@@ -154,10 +154,6 @@ def calc_position_replacement_value(input_df, pos, num_players):
     return sorted_df.Points.min()
 
 
-def calc_points_above_replacement(row):
-    return row[cols.POINTS_FIELD] - row[cols.REPLACEMENT_VALUE_FIELD]
-
-
 def main():
     # Configure argparser
     argparser = argparse.ArgumentParser(prog="make_value_cheatsheet")
