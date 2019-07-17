@@ -1,6 +1,7 @@
 import sys
 import logging
 from statistics import mean
+import re
 
 def configure_logging(verbosity):
     # Setting the format of the logs
@@ -120,3 +121,8 @@ def calc_next_best_available_group(row, input_df=None, group_size=3):
 def calc_value_of_next_available_group(row, input_df=None, group_size=3):
     name, points = get_next_best_available_player_group(row, input_df, group_size)
     return points
+
+def clean_string_for_file_name(value):
+    clean_val = re.sub('[^\w\s-]', '', value).strip().lower()
+    clean_val = re.sub('[-\s]+', '-', clean_val)
+    return clean_val
