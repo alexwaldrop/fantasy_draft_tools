@@ -227,7 +227,7 @@ def main():
         num_drafted = input_df[~pd.isnull(input_df[cols.DRAFT_STATUS])].shape[0]
 
         # Calculate current round and pick position based on num drafted
-        curr_round = ((num_drafted + 1) // league_size) + 1
+        curr_round = ((num_drafted - 1) // league_size) + 1
         curr_pick = num_drafted + 1
 
         # Log basic info
