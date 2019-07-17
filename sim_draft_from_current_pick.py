@@ -13,7 +13,7 @@ POSITIONS = ["RB", "WR", "TE", "QB"]
 # TODO: Read hard-coded config from external file
 league_config = {"start_rb": 2, "start_wr": 2, "start_qb": 1, "start_te": 1, "start_flex": 1,
                  "flex_pos": ["RB", "WR"], "min_rb": 4, "min_wr": 4, "min_qb": 1, "min_te": 1,
-                 "max_rb": 7, "max_wr": 7, "max_qb": 1, "max_te": 2,
+                 "max_rb": 7, "max_wr": 7, "max_qb": 1, "max_te": 1,
                  "team_size": 14, "league_size": 12}
 
 class Team:
@@ -299,7 +299,17 @@ def get_best_draftable_players(draftable_df, num_to_draft=3):
     return players
 
 
-def get_possible_teams(my_team, input_df, my_draft_slot, league_config, window_size=3, num_to_draft=2, size_threshold=50000, num_to_consider=8):
+def log_draftable_players(draftable_players_dict, draft_round):
+    for pos in draftable_players_dict:
+        player_string_list = []
+        max_name_len = max([len(x[0]) for x in draftable_players_dict[pos]])
+        for player in draftable_players_dict[pos]:
+            player_string_list.append("{0:<{width}} {1:0.2f}".format(player[0]+":", player[1], width=max_name_len+2))
+        logging.debug("Rd. {0} best available {1}\n"
+                      "{2}\n".format(draft_round, pos, "\n".join(player_string_list)))
+
+
+def get_possible_teams(my_team, input_df, my_draft_slot, league_config, window_size=3, num_to_draft=3, size_threshold=50000, num_to_consider=8):
     teams = [my_team]
     team_ids = {my_team.team_id: True}
     team_size = my_team.size
@@ -313,65 +323,82 @@ def get_possible_teams(my_team, input_df, my_draft_slot, league_config, window_s
 
     # Add final draft window for last pick
     possible_positions.append(input_df[cols.DRAFT_RANK_FIELD].max())
-    print(possible_positions)
+    logging.debug("Autodraft slots at current slot: {0}".format(possible_positions))
 
     while team_size < league_config["team_size"] and curr_draft_pos <= input_df[cols.DRAFT_RANK_FIELD].max():
         logging.debug("Simulated draft round: {0}".format(team_size+1))
 
         # Get draft positions available at current draft slot
         next_draft_slots = [pos for pos in possible_positions if pos >= curr_draft_pos][0:window_size]
-        print(next_draft_slots)
+        logging.debug("Considering players within pick window: {0}-{1}".format(next_draft_slots[0],
+                                                                               next_draft_slots[window_size-1]))
 
-        # Get draftable players at each position
+        # Subset players to include only those which are expected to be drafted inside current window
         draftable_df = input_df[(input_df[cols.DRAFT_RANK_FIELD] >= next_draft_slots[0]) &
                                 (input_df[cols.DRAFT_RANK_FIELD] <= next_draft_slots[window_size-1])]
-        #print(draftable_df)
 
+        # Select best N players at each position to consider drafting
         draftable_players = get_best_draftable_players(draftable_df, num_to_consider)
-        print(draftable_players)
+        log_draftable_players(draftable_players, team_size+1)
 
-        # Create new teams for each potentially draftable player
+        # New teams that will be created by adding an additional player to existing team
         new_teams = []
 
-        # Loop through teams and create new branches
+        # Loop through existing teams and create one new team for each potential player drafted in this round
         for team in teams:
-            # Loop through positions and add one of each to existing teams to create new teams
 
-            # Make copy of team before any players added
+            # Make root copy of team before any players added
             original_team = deepcopy(team)
 
-            # Branch new teams from existing team for each player drafted
+            # Boolean for whether original team in teams list has had a player added
+            # Once a player has been added to the root team object, additional teams created as copy of original_team
             original_has_drafted = False
+
+            # Create new teams by adding a potentially draftable player to a copy of the old team
+            # Creates up to num_positions * num_added new teams for each existing team in teams list
             for pos in draftable_players:
+                # Check to see if the root team can even add a player at the current position
+                # Team object will apply rules specified in league_config to determine whether pos is addable
                 if original_team.can_add_player(pos):
                     num_added = 0
                     for player in draftable_players[pos]:
+                        # Loop through draftable players until num_added new teams have been created
                         if player[0] in original_team.player_names:
+                            # Don't add duplicate player to team
                             continue
                         if not original_has_drafted:
+                            # First player added to team this round.
+                            # Create new team from actual team object
                             team.draft_player(player[0], pos, player[1])
                             original_has_drafted = True
                             num_added += 1
                         else:
+                            # Create new team by adding player to copy of root team
                             new_team = deepcopy(original_team)
                             new_team.draft_player(player[0], pos, player[1])
 
                             # Only add team if it's truly a unique combination of players
+                            # Check if sorted list of player names is identical to existing team
                             if new_team.team_id not in team_ids:
                                 new_teams.append(new_team)
                                 team_ids[new_team.team_id] = True
                                 num_added += 1
 
+                        # No need to add any more players if we've already created enough new teams at current position
                         if num_added >= num_to_draft:
                             break
 
         # Add new teams to branch of teams
         teams += new_teams
         logging.debug("Total teams: {0}".format(len(teams)))
+
+        # Randomly subset teams if number of teams is > threshold
+        # Prevents exponential growth of teams
+        # Makes this program an approximate solution
         if len(teams) > size_threshold:
             logging.info("Team threshold reached. Randomly selecting subset of {0} (including top-50 best current teams)!".format(size_threshold))
             top_teams = sorted(teams, key=lambda x: x.get_startable_value(), reverse=True)[0:50]
-            teams = random.sample(teams, size_threshold) + top_teams
+            teams = random.sample(teams, size_threshold-50) + top_teams
             logging.info("New number of teams: {0}".format(len(teams)))
 
         # Increment draft position for next round
@@ -380,6 +407,7 @@ def get_possible_teams(my_team, input_df, my_draft_slot, league_config, window_s
         # Update current size of teams created
         team_size += 1
 
+    # Return final list of teams
     return teams
 
 def main():
