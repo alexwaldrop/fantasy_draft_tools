@@ -530,7 +530,9 @@ def main():
     # Get list of players you're considering drafting with next pick
     players_to_sim = list(input_df[~pd.isnull(input_df[cols.RUN_SIM_DRAFT])][cols.NAME_FIELD])
     if not players_to_sim:
+        # Auto-select next players by VORP if no players selected
         players_to_sim = auto_select_draft_choices(input_df, league_config)
+        # Error out if not draftable players remain
         if not players_to_sim:
             logging.error("No draftable players remain!")
 
