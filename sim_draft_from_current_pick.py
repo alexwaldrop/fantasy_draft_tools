@@ -236,10 +236,10 @@ def parse_input_file(input_file):
     my_picks = list(input_df[~pd.isnull(input_df[cols.MY_PICKS])].index)
     potential_picks = list(input_df[~pd.isnull(input_df[cols.RUN_SIM_DRAFT])].index)
 
-    if not potential_picks:
-        logging.error("You didn't select any players to consider drafting! "
-                      "Mark some players for consideration in the '%s' column!" % cols.RUN_SIM_DRAFT)
-        errors = True
+    #if not potential_picks:
+    #    logging.error("You didn't select any players to consider drafting! "
+    #                  "Mark some players for consideration in the '%s' column!" % cols.RUN_SIM_DRAFT)
+    #    errors = True
 
     # Check to make sure all your picks have actually been drafted
     for pick in my_picks:
@@ -269,6 +269,36 @@ def calc_position_replacement_value(input_df, pos, num_players):
     if num_players < len(sorted_df.index):
         sorted_df = sorted_df.iloc[0:num_players+1]
     return sorted_df.Points.min()
+
+
+def auto_select_draft_choices(input_df, league_config):
+
+    # Build team as it current is to see what positions are needed
+    curr_players = list(input_df[~pd.isnull(input_df[cols.MY_PICKS])].index)
+    curr_team = Team(league_config)
+    for drafted_player in curr_players:
+        name = input_df.loc[drafted_player, cols.NAME_FIELD]
+        pos = input_df.loc[drafted_player, cols.POS_FIELD]
+        value = input_df.loc[drafted_player, cols.VORP_FIELD]
+        curr_team.draft_player(name, pos, value)
+
+    # Sort players by VORP so we can just grab the best player at the position by VORP
+    input_df.sort_values(by=cols.VORP_FIELD, ascending=False, inplace=True)
+
+    # Go find next available players needed by team
+    players_to_sim = []
+    for pos in list(input_df[cols.POS_FIELD].unique()):
+        # Skip position if current team already has requirements met
+        if not curr_team.can_add_player(pos):
+            logging.warning("Not considering drafting new {0} because position maximum reached on current team!".format(pos))
+            continue
+
+        # Otherwise get the next best player by VORP at the position
+        next_best = list(input_df[(input_df[cols.POS_FIELD] == pos) &
+                                  (pd.isnull(input_df[cols.DRAFT_STATUS]))][cols.NAME_FIELD])
+        if next_best:
+            players_to_sim.append(next_best[0])
+    return players_to_sim
 
 
 def get_initial_input_df(player_to_draft, input_df):
@@ -309,7 +339,7 @@ def log_draftable_players(draftable_players_dict, draft_round):
                       "{2}\n".format(draft_round, pos, "\n".join(player_string_list)))
 
 
-def get_possible_teams(my_team, input_df, my_draft_slot, league_config, window_size=3, num_to_draft=3, size_threshold=50000, num_to_consider=8):
+def get_possible_teams(my_team, input_df, my_draft_slot, league_config, window_size=5, num_to_draft=3, size_threshold=50000, num_to_consider=8):
     teams = [my_team]
     team_ids = {my_team.team_id: True}
     team_size = my_team.size
@@ -410,6 +440,7 @@ def get_possible_teams(my_team, input_df, my_draft_slot, league_config, window_s
     # Return final list of teams
     return teams
 
+
 def main():
     # Configure argparser
     argparser = argparse.ArgumentParser(prog="make_value_cheatsheet")
@@ -498,6 +529,10 @@ def main():
 
     # Get list of players you're considering drafting with next pick
     players_to_sim = list(input_df[~pd.isnull(input_df[cols.RUN_SIM_DRAFT])][cols.NAME_FIELD])
+    if not players_to_sim:
+        players_to_sim = auto_select_draft_choices(input_df, league_config)
+        if not players_to_sim:
+            logging.error("No draftable players remain!")
 
     # Update num drafted and current pick to reflect that you'll pick one of the potential guys
     num_drafted += 1
@@ -530,7 +565,7 @@ def main():
                                                                         curr_pick=curr_pick)
 
         draft_input_df[cols.DRAFT_SLOT_FIELD] = pd.Series(draft_slots).values
-        print(draft_input_df.head(35))
+        logging.debug("Current draft board:\n{0}".format(draft_input_df.head(num_drafted+10)))
 
         # Initialize new Team object for holding current team
         new_team = Team(league_config)
@@ -540,8 +575,8 @@ def main():
             value = draft_input_df.loc[drafted_player, cols.VORP_FIELD]
             new_team.draft_player(name, pos, value)
 
+        # Generate possible teams
         draft_results = get_possible_teams(new_team, draft_input_df, my_draft_slot, league_config)
-        print("LEN DRAFT RESULTS: %s" % len(draft_results))
 
         logging.info("Sorting draft results...")
         draft_results = sorted(draft_results, key=lambda x: x.get_startable_value(), reverse=True)
