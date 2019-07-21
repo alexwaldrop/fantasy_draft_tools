@@ -184,8 +184,9 @@ def main():
     # Get only required columns and add columns for entering draft picks
     col_order = proj_df.columns.tolist()
     col_order.remove(NORMALIZED_NAME_FIELD)
-    for col in [cols.DRAFT_STATUS, cols.MY_PICKS, cols.RUN_SIM_DRAFT]:
-        col_order.remove(col)
+    for col in [cols.RUN_SIM_DRAFT, cols.MY_PICKS, cols.DRAFT_STATUS]:
+        if col in output_df.columns:
+            col_order.remove(col)
         output_df[col] = np.nan
         col_order.insert(3, col)
 
