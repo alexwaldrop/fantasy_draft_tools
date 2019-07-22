@@ -41,6 +41,14 @@ def configure_argparser(argparser_obj):
                                required=True,
                                help="Path to rankings spreadsheet")
 
+    # Path to risk spreadsheet
+    argparser_obj.add_argument("--risk",
+                               action="store",
+                               type=file_type,
+                               dest="risk_file",
+                               required=True,
+                               help="Path to risk spreadsheet")
+
     # Path to output file
     argparser_obj.add_argument("--output",
                                action="store",
@@ -97,6 +105,9 @@ def parse_proj_file(input_file):
     if errors:
         raise IOError("Improperly formatted projections file '{0}'. See above errors".format(input_file))
 
+    # Standardize name field
+    input_df[NORMALIZED_NAME_FIELD] = input_df[cols.NAME_FIELD].map(lambda x: utils.clean_string_for_file_name(x))
+
     return input_df
 
 
@@ -110,11 +121,35 @@ def parse_rankings_file(input_file):
     for required_col in required_cols:
         if required_col not in input_df.columns:
             # Output missing colname
-            logging.error("Input file missing required col: {0}".format(required_col))
+            logging.error("Ranks file missing required col: {0}".format(required_col))
             errors = True
 
     if errors:
         raise IOError("Improperly formatted rankings file '{0}'. See above errors".format(input_file))
+
+    # Standardize name field
+    input_df[NORMALIZED_NAME_FIELD] = input_df[cols.NAME_FIELD].map(lambda x: utils.clean_string_for_file_name(x))
+
+    return input_df
+
+def parse_risk_file(input_file):
+    # Parse input file and check format
+    input_df = pd.read_excel(input_file)
+
+    # Check required columns present
+    required_cols = [cols.NAME_FIELD, cols.RISK_FIELD]
+    errors = False
+    for required_col in required_cols:
+        if required_col not in input_df.columns:
+            # Output missing colname
+            logging.error("Risk file missing required col: {0}".format(required_col))
+            errors = True
+
+    if errors:
+        raise IOError("Improperly formatted risk file '{0}'. See above errors".format(input_file))
+
+    # Standardize name field
+    input_df[NORMALIZED_NAME_FIELD] = input_df[cols.NAME_FIELD].map(lambda x: utils.clean_string_for_file_name(x))
 
     return input_df
 
@@ -125,6 +160,34 @@ def check_name(name, rank_names):
         return True
     return False
 
+def check_names(proj_df, other_df, other_type):
+    # Check to make sure all names in the projections map to someone in the rankings
+    rank_names = list(other_df[NORMALIZED_NAME_FIELD])
+
+    name_matches = proj_df[NORMALIZED_NAME_FIELD].map(lambda x: check_name(x, rank_names))
+    if name_matches.any():
+        raise IOError("One or more players in {0} spreadhsheet not found in rankings file!".format(other_type))
+
+def merge_sheets(proj_df, other_df, other_type):
+    # Merge dataframes
+    output_df = proj_df.merge(other_df, how='left', on=NORMALIZED_NAME_FIELD, validate='one_to_one')
+    if len(output_df) != len(proj_df):
+        logging.error("Something went wrong merging the {0} spreadsheet. "
+                      "Projections has {1} rows and merged output has {2} cols".format(other_type,
+                                                                                       len(proj_df),
+                                                                                       len(output_df)))
+
+    # Fix column names
+    colnames = []
+    for col in output_df.columns:
+        if col.endswith("_x") and not col.startswith(cols.ADP_FIELD) and not col.startswith(cols.RISK_FIELD):
+            colnames.append(col[0:-2])
+        elif col.endswith("_y") and (col.startswith(cols.ADP_FIELD) or col.startswith(cols.RISK_FIELD)):
+            colnames.append(col[0:-2])
+        else:
+            colnames.append(col)
+    output_df.columns = colnames
+    return(output_df)
 
 def main():
     # Configure argparser
@@ -140,6 +203,7 @@ def main():
     # Get names of input/output files
     proj_file = args.proj_file
     rank_file = args.rank_file
+    risk_file = args.risk_file
     out_file = args.output_file
 
     logging.info("Using projections file: {0}".format(proj_file))
@@ -151,35 +215,16 @@ def main():
     # Check rankings input file for formatting and read into pandas
     rank_df = parse_rankings_file(rank_file)
 
-    # Add normalized name columns to both
-    proj_df[NORMALIZED_NAME_FIELD] = proj_df[cols.NAME_FIELD].map(lambda x: utils.clean_string_for_file_name(x))
-    rank_df[NORMALIZED_NAME_FIELD] = rank_df[cols.NAME_FIELD].map(lambda x: utils.clean_string_for_file_name(x))
+    # Check risk file for formatting
+    risk_df = parse_risk_file(risk_file)
 
-    # Check to make sure all names in the projections map to someone in the rankings
-    rank_names = list(rank_df[NORMALIZED_NAME_FIELD])
-
-    name_matches = proj_df[NORMALIZED_NAME_FIELD].map(lambda x: check_name(x, rank_names))
-    if name_matches.any():
-        raise IOError("One or more players in projection spreadhsheet not found in rankings file!")
+    # Check to make sure all names in projection spreadsheet exist in rankings, risk spreadsheets
+    check_names(proj_df, rank_df, other_type="Rankings")
+    check_names(proj_df, risk_df, other_type="Risk")
 
     # Merge dataframes
-    output_df = proj_df.merge(rank_df, how='left', on=NORMALIZED_NAME_FIELD, validate='one_to_one')
-    if len(output_df) != len(proj_df):
-        logging.error("Something went wrong in the merge. "
-                      "Projections has {0} rows and merged output has {1} cols".format(len(proj_df),
-                                                                                       len(output_df)))
-
-    # Fix column names
-    colnames = []
-    for col in output_df.columns:
-        if col.endswith("_x") and not col.startswith(cols.ADP_FIELD):
-            colnames.append(col[0:-2])
-        elif col.endswith("_y") and col.startswith(cols.ADP_FIELD):
-            colnames.append(col[0:-2])
-        else:
-            colnames.append(col)
-    output_df.columns = colnames
-
+    output_df = merge_sheets(proj_df, rank_df, other_type="Rankings")
+    output_df = merge_sheets(output_df, risk_df, other_type="Risk")
 
     # Get only required columns and add columns for entering draft picks
     col_order = proj_df.columns.tolist()
