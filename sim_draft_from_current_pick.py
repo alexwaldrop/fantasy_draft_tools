@@ -18,7 +18,8 @@ league_config = {"start_rb": 2, "start_wr": 2, "start_qb": 1, "start_te": 1, "st
                  "flex_pos": ["RB", "WR"], "min_rb": 4, "min_wr": 4, "min_qb": 1, "min_te": 1,
                  "max_rb": 7, "max_wr": 7, "max_qb": 1, "max_te": 1,
                  "team_size": 14, "league_size": 12,
-                 "vorp_cutoffs": {"QB": 8, "RB": 36, "WR": 38, "TE": 8}}
+                 "vorp_cutoffs": {"QB": 8, "RB": 36, "WR": 38, "TE": 8},
+                 "vbd_adp_cutoff": 100}
 
 class Team:
     def __init__(self, league_config):
@@ -172,8 +173,6 @@ class Team:
                            "Startable Points","Startable Risk",
                            "Risk Adj. Value","Risk Adj. Startable Value"])
 
-
-
     def __eq__(self, team):
         return team.team_id == self.team_id
 
@@ -321,12 +320,11 @@ class DraftBoard:
         if cols.DRAFT_RANK_FIELD not in self.draft_df.columns:
             self.generate_autodraft_slots()
 
-        # Get ADP cutoff value depending on league size
-        adp_cutoff = league_config["league_size"]*10
-
         pos_repl_val = {}
         for pos in league_config["vorp_cutoffs"]:
-            pos_repl_val[pos] = calc_position_replacement_value(self.draft_df, pos, adp_cutoff)
+            pos_repl_val[pos] = calc_position_replacement_value(self.draft_df,
+                                                                pos,
+                                                                adp_cutoff=league_config["vbd_adp_cutoff"])
 
         # Add column for value over positional replacement for each player
         self.draft_df[cols.REPLACEMENT_VALUE_FIELD] = self.draft_df[cols.POS_FIELD].map(pos_repl_val)
@@ -370,7 +368,8 @@ class DraftBoard:
         for i in range(len(self.my_players.sort_values(by=cols.VORP_RANK_FIELD))):
             name = self.my_players.iloc[i][cols.NAME_FIELD]
             pos = self.my_players.iloc[i][cols.POS_FIELD]
-            points = self.my_players.iloc[i][cols.POINTS_FIELD]
+            #points = self.my_players.iloc[i][cols.POINTS_FIELD]
+            points = self.my_players.iloc[i][cols.VORP_FIELD]
             risk = self.my_players.iloc[i][cols.RISK_FIELD]
             my_team.draft_player(name, pos, points, risk)
 
@@ -398,7 +397,8 @@ class DraftBoard:
         players = {}
         for pos in self.league_config["vorp_cutoffs"]:
             best_avail_name = list(draftable_df[draftable_df[cols.POS_FIELD] == pos][cols.NAME_FIELD])
-            best_avail_pts = list(draftable_df[draftable_df[cols.POS_FIELD] == pos][cols.POINTS_FIELD])
+            #best_avail_pts = list(draftable_df[draftable_df[cols.POS_FIELD] == pos][cols.POINTS_FIELD])
+            best_avail_pts = list(draftable_df[draftable_df[cols.POS_FIELD] == pos][cols.VORP_FIELD])
             best_avail_risk = list(draftable_df[draftable_df[cols.POS_FIELD] == pos][cols.RISK_FIELD])
             if best_avail_name:
                 num_avail = min(len(best_avail_name), pos_group_size)
