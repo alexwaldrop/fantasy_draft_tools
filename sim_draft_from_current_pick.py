@@ -4,10 +4,7 @@ import logging
 import pandas as pd
 from copy import deepcopy
 import random
-from queue import Queue
 import multiprocessing
-import concurrent.futures
-from functools import partial
 import time
 import math
 
@@ -770,17 +767,15 @@ def main():
         logging.debug("Current draft board:\n{0}".format(sim_draft_board.draft_df.head(sim_draft_board.num_drafted+30)))
 
         # Generate possible teams
-        draft_results = get_possible_teams(sim_draft_board,
-                                           my_draft_slot=draft_board.next_draft_slot_up,
-                                           league_config=league_config,
-                                           max_teams_per_round=max_teams_per_round,
-                                           max_top_teams_per_round=max_top_teams_per_round,
-                                           num_workers=num_threads)
-
-        logging.info("Sorting draft results...")
-        possible_teams += draft_results
+        possible_teams += get_possible_teams(sim_draft_board,
+                                             my_draft_slot=draft_board.next_draft_slot_up,
+                                             league_config=league_config,
+                                             max_teams_per_round=max_teams_per_round,
+                                             max_top_teams_per_round=max_top_teams_per_round,
+                                             num_workers=num_threads)
 
     # Sort by start team value
+    logging.info("Sorting draft results...")
     possible_teams = sorted(possible_teams, key=lambda x: x.risk_adjusted_startable_value, reverse=True)
 
     # Create output filename
