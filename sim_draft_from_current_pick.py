@@ -102,11 +102,10 @@ class Team:
     def __str__(self):
         player_string = ", ".join([str(x[0]) for x in self.draft_order])
         point_string = ", ".join([str(int(x[1])) for x in self.draft_order])
-        return "%s\t%s\t%s\t%s\t%s" % (player_string,
-                                       point_string,
-                                       self.total_value,
-                                       self.get_startable_value(),
-                                       self.get_combined_value())
+        return "%s\t%s\t%s\t%s" % (player_string,
+                                   point_string,
+                                   self.total_value,
+                                   self.get_startable_value())
 
     def __eq__(self, team):
         return team.team_id == self.team_id
@@ -266,7 +265,10 @@ class DraftBoard:
         self.draft_df[cols.PREDICTABILITY] = self.draft_df[cols.POS_FIELD].map(league_config["predictability"])
 
         # Add column for points above average draftable replacement
-        self.draft_df[cols.VORP_FIELD] = (self.draft_df[cols.POINTS_FIELD] - self.draft_df[cols.REPLACEMENT_VALUE_FIELD])*self.draft_df[cols.PREDICTABILITY]
+        self.draft_df[cols.RAW_VORP_FIELD] = self.draft_df[cols.POINTS_FIELD] - self.draft_df[cols.REPLACEMENT_VALUE_FIELD]
+        self.draft_df[cols.VORP_FIELD] = self.draft_df[cols.RAW_VORP_FIELD] * self.draft_df[cols.PREDICTABILITY]
+
+        self.draft_df[cols.ADJ_POINTS_FIELD] = self.draft_df[cols.POINTS_FIELD] * self.draft_df[cols.PREDICTABILITY]
 
         # Sort by average value
         self.draft_df.sort_values(by=cols.VORP_FIELD, ascending=False, inplace=True)
@@ -304,8 +306,8 @@ class DraftBoard:
         for i in range(len(self.my_players.sort_values(by=cols.VORP_RANK_FIELD))):
             name = self.my_players.iloc[i][cols.NAME_FIELD]
             pos = self.my_players.iloc[i][cols.POS_FIELD]
-            vorp = self.my_players.iloc[i][cols.VORP_FIELD]
-            my_team.draft_player(name, pos, vorp)
+            points = self.my_players.iloc[i][cols.ADJ_POINTS_FIELD]
+            my_team.draft_player(name, pos, points)
 
         return my_team
 
@@ -331,7 +333,8 @@ class DraftBoard:
         players = {}
         for pos in self.league_config["vorp_cutoffs"]:
             best_avail_name = list(draftable_df[draftable_df[cols.POS_FIELD] == pos][cols.NAME_FIELD])
-            best_avail_pts = list(draftable_df[draftable_df[cols.POS_FIELD] == pos][cols.VORP_FIELD])
+            #best_avail_pts = list(draftable_df[draftable_df[cols.POS_FIELD] == pos][cols.VORP_FIELD])
+            best_avail_pts = list(draftable_df[draftable_df[cols.POS_FIELD] == pos][cols.ADJ_POINTS_FIELD])
             if best_avail_name:
                 num_avail = min(len(best_avail_name), pos_group_size)
                 players[pos] = list(zip(best_avail_name[0:num_avail], best_avail_pts[0:num_avail]))
@@ -512,14 +515,14 @@ def expand_teams(teams, draftable_players, max_to_draft_per_pos, out_q, max_team
                         break
 
     if len(new_teams) > max_teams_to_keep:
-        #top_teams = sorted(new_teams.values(), key=lambda x: x.get_startable_value(), reverse=True)
-        top_teams = sorted(new_teams.values(), key=lambda x: x.get_combined_value(), reverse=True)
+        top_teams = sorted(new_teams.values(), key=lambda x: x.total_value, reverse=True)
+        #top_teams = sorted(new_teams.values(), key=lambda x: x.get_combined_value(), reverse=True)
         new_teams = top_teams[0:max_top_teams_to_keep] + random.sample(top_teams[max_top_teams_to_keep:], max_teams_to_keep - max_top_teams_to_keep)
         new_teams = {team.team_id: team for team in new_teams}
     out_q.put(new_teams)
 
 
-def get_possible_teams(draft_board, my_draft_slot, league_config, num_to_consider_per_pos=8, num_to_draft_per_pos=3, max_teams_per_round=50000, max_top_teams_per_round=50, num_workers=8):
+def get_possible_teams(draft_board, my_draft_slot, league_config, num_to_consider_per_pos=8, num_to_draft_per_pos=1, max_teams_per_round=200000, max_top_teams_per_round=200000, num_workers=8):
 
     # Initialize search from current team on draft board
     root_team = draft_board.get_current_team()
@@ -663,6 +666,8 @@ def main():
     # Run simulation to see average team value if you draft certain players with next pick
     logging.info("Simulating drafts for players: {0}".format(", ".join(players_to_sim)))
 
+    possible_teams = []
+
     for player_to_draft in players_to_sim:
 
         # Make a clone of current draft board
@@ -680,7 +685,7 @@ def main():
         logging.info("Simulating drafting player: {0}\n"
                      "Current team: {1}".format(player_to_draft,
                                                 ", ".join(curr_team)))
-        logging.debug("Current draft board:\n{0}".format(sim_draft_board.draft_df.head(sim_draft_board.num_drafted+10)))
+        logging.debug("Current draft board:\n{0}".format(sim_draft_board.draft_df.head(sim_draft_board.num_drafted+30)))
 
         # Generate possible teams
         draft_results = get_possible_teams(sim_draft_board,
@@ -691,19 +696,20 @@ def main():
                                            num_workers=num_threads)
 
         logging.info("Sorting draft results...")
-        draft_results = sorted(draft_results, key=lambda x: x.get_combined_value(), reverse=True)
+        possible_teams += draft_results
 
-        # Create output filename
-        out_file = "{0}.round{1}.slot{2}.{3}.simdraft.txt".format(out_prefix,
-                                                                  draft_board.curr_round,
-                                                                  draft_board.next_draft_slot_up,
-                                                                  utils.clean_string_for_file_name(player_to_draft))
+    # Sort by start team value
+    possible_teams = sorted(possible_teams, key=lambda x: x.get_startable_value(), reverse=True)
+    # Create output filename
+    out_file = "{0}.round{1}.slot{2}.simdraft.txt".format(out_prefix,
+                                                              draft_board.curr_round,
+                                                              draft_board.next_draft_slot_up)
 
-        logging.info("Writing draft results to file: {0}".format(out_file))
-        with open(out_file, "w") as fh:
-            fh.write("Team\tPlayer VORP\tTotal VORP\tStarting VORP\t Real team VORP")
-            for draft_result in draft_results:
-                fh.write("%s\n" % str(draft_result))
+    logging.info("Writing draft results to file: {0}".format(out_file))
+    with open(out_file, "w") as fh:
+        fh.write("Team\tPlayer Proj Points\tTotal Points\tStarting Points\n")
+        for draft_result in possible_teams:
+            fh.write("%s\n" % str(draft_result))
 
 
 if __name__ == "__main__":
