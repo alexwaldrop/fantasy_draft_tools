@@ -21,8 +21,7 @@ league_config = {"start_rb": 2, "start_wr": 2, "start_qb": 1, "start_te": 1, "st
                  "flex_pos": ["RB", "WR"], "min_rb": 4, "min_wr": 4, "min_qb": 1, "min_te": 1,
                  "max_rb": 7, "max_wr": 7, "max_qb": 1, "max_te": 1,
                  "team_size": 14, "league_size": 12,
-                 "vorp_cutoffs": {"QB": 8, "RB": 36, "WR": 38, "TE": 8},
-                 "predictability": {"QB": 0.77, "RB": 0.83, "WR": 1, "TE": 0.5}}
+                 "vorp_cutoffs": {"QB": 8, "RB": 36, "WR": 38, "TE": 8}}
 
 class Team:
     def __init__(self, league_config):
@@ -36,25 +35,64 @@ class Team:
         self.draft_order = []
         self.size = 0
         self.total_value = 0
+        self.total_risk  = 0
 
     @property
     def player_names(self):
         return [x[0] for x in self.draft_order]
 
     @property
+    def starter_names(self):
+        flex_pos = []
+        starters = []
+        for pos in self.players:
+            data = sorted(self.players[pos], key=lambda tup: tup[1], reverse=True)
+            num_start = league_config["start_%s" % pos.lower()]
+            starters += [x[0] for x in data[0:num_start]]
+
+            # Add non-starting position players to pool of potential flex players
+            if pos in self.league_config["flex_pos"]:
+                flex_pos += [x for x in data[num_start:]]
+
+        # Calculate value of flex players from non-starting positional players
+        data = sorted(flex_pos, key=lambda tup: tup[1], reverse=True)
+        starters += [x[0] for x in data[0:self.league_config["start_flex"]]]
+        return starters
+
+    @property
     def team_id(self):
         return "_".join(sorted(self.player_names))
 
-    def draft_player(self, player_id, pos, value):
+    @property
+    def startable_risk(self):
+        starters = self.starter_names
+        return sum([x[2] for x in self.draft_order if x[0] in starters])
+
+    @property
+    def startable_value(self):
+        starters = self.starter_names
+        return sum([x[1] for x in self.draft_order if x[0] in starters])
+
+    @property
+    def risk_adjusted_value(self):
+        return sum([x[1] / float(max(x[2], 1)) for x in self.draft_order])
+
+    @property
+    def risk_adjusted_startable_value(self):
+        starters = self.starter_names
+        return sum([x[1]/float(max(1,x[2])) for x in self.draft_order if x[0] in starters])
+
+    def draft_player(self, player_id, pos, value, risk):
         if pos not in self.players:
             logging.error("Attempted to add player with id '{0}' with invalid position: {1}".format(player_id, pos))
             raise IOError("Attempted to add player to team with invalid position!")
 
         # Add to list of players
-        self.players[pos].append((player_id, value))
-        self.draft_order.append((player_id, value))
+        self.players[pos].append((player_id, value, risk))
+        self.draft_order.append((player_id, value, risk))
         self.size += 1
         self.total_value += value
+        self.total_risk += risk
 
     def can_add_player(self, pos):
         # Check if adding player exceeds team size
@@ -93,19 +131,51 @@ class Team:
 
         # Calculate value of flex players from non-starting positional players
         data = sorted(flex_pos, key=lambda tup: tup[1], reverse=True)
-        start_value += sum(x[1] for x in data[0:self.league_config["start_flex"]])
+        start_value += sum([x[1] for x in data[0:self.league_config["start_flex"]]])
         return start_value
 
-    def get_combined_value(self):
-        return (self.get_startable_value() + self.total_value)/2.0
+    def get_startable_risk(self):
+        # Calculate average value of team under scenarios where each pick is a "bust"
+        start_risk = 0
+        flex_pos = []
+        for pos in self.players:
+            data = sorted(self.players[pos], key=lambda tup: tup[1], reverse=True)
+            num_start = league_config["start_%s" % pos.lower()]
+            start_risk += sum([x[2] for x in data[0:num_start]])
 
-    def __str__(self):
+            # Add non-starting position players to pool of potential flex players
+            if pos in self.league_config["flex_pos"]:
+                flex_pos += [x for x in data[num_start:]]
+
+        # Calculate value of flex players from non-starting positional players
+        data = sorted(flex_pos, key=lambda tup: tup[1], reverse=True)
+        start_risk += sum([x[2] for x in data[0:self.league_config["start_flex"]]])
+        return start_risk
+
+    def get_risk_adj_value(self):
+        return self.total_value/float(self.total_risk)
+
+    def get_summary_string(self):
         player_string = ", ".join([str(x[0]) for x in self.draft_order])
         point_string = ", ".join([str(int(x[1])) for x in self.draft_order])
-        return "%s\t%s\t%s\t%s" % (player_string,
-                                   point_string,
-                                   self.total_value,
-                                   self.get_startable_value())
+        risk_string = ", ".join([str(int(x[2])) for x in self.draft_order])
+        return "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s" % (player_string,
+                                                       point_string,
+                                                       risk_string,
+                                                       self.total_value,
+                                                       self.total_risk,
+                                                       self.startable_value,
+                                                       self.startable_risk,
+                                                       self.risk_adjusted_value,
+                                                       self.risk_adjusted_startable_value)
+
+    def get_summary_string_header(self, delim="\t"):
+        return delim.join(["Team", "Player Points", "Player Risk",
+                           "Total Points","Total Risk",
+                           "Startable Points","Startable Risk",
+                           "Risk Adj. Value","Risk Adj. Startable Value"])
+
+
 
     def __eq__(self, team):
         return team.team_id == self.team_id
@@ -116,12 +186,13 @@ class Team:
         copy_object.draft_order = [x for x in self.draft_order]
         copy_object.size = self.size
         copy_object.total_value = self.total_value
+        copy_object.total_risk = self.total_risk
         return copy_object
 
 
 class DraftBoard:
     required_cols = [cols.NAME_FIELD, cols.POS_FIELD, cols.POINTS_FIELD, cols.ADP_FIELD,
-                     cols.DRAFT_STATUS, cols.MY_PICKS, cols.RUN_SIM_DRAFT]
+                     cols.DRAFT_STATUS, cols.MY_PICKS, cols.RUN_SIM_DRAFT, cols.RISK_FIELD]
 
     def __init__(self, draft_df, league_config):
 
@@ -262,13 +333,9 @@ class DraftBoard:
 
         # Add column for value over positional replacement for each player
         self.draft_df[cols.REPLACEMENT_VALUE_FIELD] = self.draft_df[cols.POS_FIELD].map(pos_repl_val)
-        self.draft_df[cols.PREDICTABILITY] = self.draft_df[cols.POS_FIELD].map(league_config["predictability"])
 
         # Add column for points above average draftable replacement
-        self.draft_df[cols.RAW_VORP_FIELD] = self.draft_df[cols.POINTS_FIELD] - self.draft_df[cols.REPLACEMENT_VALUE_FIELD]
-        self.draft_df[cols.VORP_FIELD] = self.draft_df[cols.RAW_VORP_FIELD] * self.draft_df[cols.PREDICTABILITY]
-
-        self.draft_df[cols.ADJ_POINTS_FIELD] = self.draft_df[cols.POINTS_FIELD] * self.draft_df[cols.PREDICTABILITY]
+        self.draft_df[cols.VORP_FIELD] = self.draft_df[cols.POINTS_FIELD] - self.draft_df[cols.REPLACEMENT_VALUE_FIELD]
 
         # Sort by average value
         self.draft_df.sort_values(by=cols.VORP_FIELD, ascending=False, inplace=True)
@@ -306,8 +373,9 @@ class DraftBoard:
         for i in range(len(self.my_players.sort_values(by=cols.VORP_RANK_FIELD))):
             name = self.my_players.iloc[i][cols.NAME_FIELD]
             pos = self.my_players.iloc[i][cols.POS_FIELD]
-            points = self.my_players.iloc[i][cols.ADJ_POINTS_FIELD]
-            my_team.draft_player(name, pos, points)
+            points = self.my_players.iloc[i][cols.POINTS_FIELD]
+            risk = self.my_players.iloc[i][cols.RISK_FIELD]
+            my_team.draft_player(name, pos, points, risk)
 
         return my_team
 
@@ -333,11 +401,13 @@ class DraftBoard:
         players = {}
         for pos in self.league_config["vorp_cutoffs"]:
             best_avail_name = list(draftable_df[draftable_df[cols.POS_FIELD] == pos][cols.NAME_FIELD])
-            #best_avail_pts = list(draftable_df[draftable_df[cols.POS_FIELD] == pos][cols.VORP_FIELD])
-            best_avail_pts = list(draftable_df[draftable_df[cols.POS_FIELD] == pos][cols.ADJ_POINTS_FIELD])
+            best_avail_pts = list(draftable_df[draftable_df[cols.POS_FIELD] == pos][cols.POINTS_FIELD])
+            best_avail_risk = list(draftable_df[draftable_df[cols.POS_FIELD] == pos][cols.RISK_FIELD])
             if best_avail_name:
                 num_avail = min(len(best_avail_name), pos_group_size)
-                players[pos] = list(zip(best_avail_name[0:num_avail], best_avail_pts[0:num_avail]))
+                players[pos] = list(zip(best_avail_name[0:num_avail],
+                                        best_avail_pts[0:num_avail],
+                                        best_avail_risk[0:num_avail]))
         return players
 
     def get_autopick_pos_window(self, draft_slot, start_pick=1, end_pick=None):
@@ -416,12 +486,21 @@ def configure_argparser(argparser_obj):
                                required=True,
                                help="Num threads to use for parallel processing")
 
+    # Risk coefficient for considering risk in draft strategy (0 ignore risk, 1 factor risk complete)
+    argparser_obj.add_argument("--risk-coeff",
+                               action="store",
+                               type=float,
+                               dest="risk_coeff",
+                               default=1.0,
+                               required=False,
+                               help="Risk coefficient. Float between [0,1] 0 being ignore risk, 1 use full risk score for players")
+
     # Maximum number of teams that will be generated for each round of simulated drafting
     argparser_obj.add_argument("--max-teams-per-round",
                                action="store",
                                type=int,
                                dest="max_teams_per_round",
-                               default=50000,
+                               default=200000,
                                required=False,
                                help="Maximum number of teams to generate per round")
 
@@ -431,7 +510,7 @@ def configure_argparser(argparser_obj):
                                action="store",
                                type=int,
                                dest="max_top_teams_per_round",
-                               default=50,
+                               default=200000,
                                required=False,
                                help="Maximum number of top teams to save from each round. Rest will be randomly selected.")
 
@@ -505,7 +584,7 @@ def expand_teams(teams, draftable_players, max_to_draft_per_pos, out_q, max_team
 
                     # Create new team by adding player to copy of root team
                     new_team = deepcopy(team)
-                    new_team.draft_player(player[0], pos, player[1])
+                    new_team.draft_player(player[0], pos, player[1], player[2])
                     if new_team.team_id not in new_teams:
                         new_teams[new_team.team_id] = new_team
                     num_pos_drafted += 1
@@ -515,7 +594,7 @@ def expand_teams(teams, draftable_players, max_to_draft_per_pos, out_q, max_team
                         break
 
     if len(new_teams) > max_teams_to_keep:
-        top_teams = sorted(new_teams.values(), key=lambda x: x.total_value, reverse=True)
+        top_teams = sorted(new_teams.values(), key=lambda x: x.risk_adjusted_startable_value, reverse=True)
         #top_teams = sorted(new_teams.values(), key=lambda x: x.get_combined_value(), reverse=True)
         new_teams = top_teams[0:max_top_teams_to_keep] + random.sample(top_teams[max_top_teams_to_keep:], max_teams_to_keep - max_top_teams_to_keep)
         new_teams = {team.team_id: team for team in new_teams}
@@ -627,6 +706,7 @@ def main():
     num_threads = args.num_threads
     max_teams_per_round = args.max_teams_per_round
     max_top_teams_per_round = args.max_top_teams_per_round
+    risk_coeff = args.risk_coeff
 
     # Log basic info
     log_string = "Using input variables:\n"
@@ -645,6 +725,8 @@ def main():
     # Get average points for each position
     logging.info("Determining positional averages for each position...")
     draft_board.calc_VORP()
+
+    draft_board.draft_df[cols.RISK_FIELD] = draft_board.draft_df[cols.RISK_FIELD]*risk_coeff
 
     # Log current draft status
     logging.warning("Draft status inferred from cheatsheet:\n"
@@ -699,7 +781,8 @@ def main():
         possible_teams += draft_results
 
     # Sort by start team value
-    possible_teams = sorted(possible_teams, key=lambda x: x.get_startable_value(), reverse=True)
+    possible_teams = sorted(possible_teams, key=lambda x: x.risk_adjusted_startable_value, reverse=True)
+
     # Create output filename
     out_file = "{0}.round{1}.slot{2}.simdraft.txt".format(out_prefix,
                                                               draft_board.curr_round,
@@ -707,9 +790,9 @@ def main():
 
     logging.info("Writing draft results to file: {0}".format(out_file))
     with open(out_file, "w") as fh:
-        fh.write("Team\tPlayer Proj Points\tTotal Points\tStarting Points\n")
+        fh.write("%s\n" % possible_teams[0].get_summary_string_header())
         for draft_result in possible_teams:
-            fh.write("%s\n" % str(draft_result))
+            fh.write("%s\n" % str(draft_result.get_summary_string()))
 
 
 if __name__ == "__main__":
