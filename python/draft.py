@@ -224,7 +224,7 @@ class Team:
 
 class DraftBoard:
     required_cols = [cols.NAME_FIELD, cols.POS_FIELD, cols.POINTS_FIELD, cols.POINTS_SD_FIELD,
-                     cols.VORP_FIELD, cols.ADP_FIELD, cols.ADP_SD_FIELD,
+                     cols.VORP_FIELD, cols.ADP_FIELD, cols.ADP_SD_FIELD, cols.ADP_TIMES_DRAFTED_FIELD,
                      cols.DRAFT_STATUS, cols.MY_PICKS, cols.RUN_SIM_DRAFT]
 
     def __init__(self, draft_df, league_config):
@@ -233,7 +233,18 @@ class DraftBoard:
         self.draft_df = draft_df
 
         # Check required cols
-        self._check_required_cols()
+        utils.check_df_columns(self.draft_df,
+                               self.required_cols,
+                               err_msg="Draft board missing one or more required columns!")
+
+        #  Check all and only positions in draft config are included on draftboard
+        self._check_pos_column()
+
+        # Deduplicate players if necessary
+        self.draft_df["DupID"] = self.draft_df[cols.NAME_FIELD] + self.draft_df[cols.POS_FIELD]
+        utils.drop_duplicates_and_warn(self.draft_df,
+                                       id_col="DupID",
+                                       warn_msg="Draft board contains duplicate players!")
 
         # Validate draft status
         self._validate_draft_status()
@@ -243,9 +254,6 @@ class DraftBoard:
 
         # Add column for value-based draft rank
         self.draft_df[cols.VORP_RANK_FIELD] = self.draft_df.reset_index().index + 1
-
-        # Fill in any missing adp info
-        self._fill_missing_adp_info()
 
         # Generate auto-draft slots
         self._generate_autodraft_slots()
@@ -282,32 +290,26 @@ class DraftBoard:
     def next_draft_slot_up(self):
         return utils.get_draft_slot(self.num_drafted+1, self.league_config["draft"]["league_size"])
 
-    def _check_required_cols(self):
+    def _check_pos_column(self):
         # Check required columns present
         errors = False
-        for required_col in self.required_cols:
-            if required_col not in self.draft_df.columns:
-                # Output missing colname
-                logging.error("Input file missing required col: {0}".format(required_col))
+
+        # Convert position column to uppercase
+        self.draft_df[cols.POS_FIELD] = self.draft_df[cols.POS_FIELD].str.upper()
+
+        # Check to make sure POS column contains all RB, WR, TE, QB
+        pos_available = [x.upper() for x in set(list(self.draft_df[cols.POS_FIELD]))]
+
+        for pos in self.league_config["global"]["pos"]:
+            if pos not in pos_available:
+                logging.error("Missing players of position type: {0}".format(pos))
                 errors = True
 
-        if not errors:
-            # Convert position column to uppercase
-            self.draft_df[cols.POS_FIELD] = self.draft_df[cols.POS_FIELD].str.upper()
-
-            # Check to make sure POS column contains all RB, WR, TE, QB
-            pos_available = [x.upper() for x in set(list(self.draft_df[cols.POS_FIELD]))]
-
-            for pos in self.league_config["global"]["pos"]:
-                if pos not in pos_available:
-                    logging.error("Missing players of position type: {0}".format(pos))
-                    errors = True
-
-            # Check to make sure Pos column contains only RB, WR, TE, QB
-            for pos in pos_available:
-                if pos not in self.league_config["global"]["pos"]:
-                    logging.error("One or more players contains invalid position: {0}".format(pos))
-                    errors = True
+        # Check to make sure Pos column contains only RB, WR, TE, QB
+        for pos in pos_available:
+            if pos not in self.league_config["global"]["pos"]:
+                logging.error("One or more players contains invalid position: {0}".format(pos))
+                errors = True
 
         if errors:
             raise IOError("Improperly formatted draft board! See above errors")
@@ -373,11 +375,6 @@ class DraftBoard:
                                                                                curr_pick=self.num_drafted+1)
         self.draft_df[cols.DRAFT_SLOT_FIELD] = pd.Series(draft_slots).values
 
-    def _fill_missing_adp_info(self):
-        max_adp = self.draft_df[cols.ADP_FIELD].max() + 1
-        self.draft_df[cols.ADP_FIELD].fillna(max_adp, inplace=True)
-        self.draft_df[cols.ADP_SD_FIELD].fillna(1, inplace=True)
-
     def get_player_info_dict(self, player_name):
         # Check player exists
         self._check_player_exists(player_name)
@@ -433,20 +430,18 @@ class DraftBoard:
         # Return probability that a player will already be drafted by a given pick
         player_info = self.get_player_info_dict(player_name)
         mean        = player_info[cols.ADP_FIELD]
-        df          = self.league_config["draft"]["adp_degrees_freedom"]
-        sigma       = player_info[cols.ADP_SD_FIELD]/math.sqrt(df)
+        sd          = player_info[cols.ADP_SD_FIELD]
         # Get probability if pick_num is > mean
-        return sp.t.cdf(mean, df=df, loc=pick_num, scale=sigma)
+        return 1 - sp.norm.cdf(pick_num, loc=mean, scale=sd)
 
-    def get_player_draft_ci(self, player_name, pick_num, confidence=0.95):
-        # Return 95% confidence interval of where a player will be drafted
+    def get_player_draft_ci(self, player_name, confidence=0.95):
+        # Return confidence interval of where a player will be drafted
         player_info = self.get_player_info_dict(player_name)
         mean        = player_info[cols.ADP_FIELD]
-        df          = self.league_config["draft"]["adp_degrees_freedom"]
-        sigma       = player_info[cols.ADP_SD_FIELD]/math.sqrt(df)
-        return sp.t.interval(confidence, df=df, loc=mean, scale=sigma)
+        sd          = player_info[cols.ADP_SD_FIELD]
+        return sp.norm.interval(confidence, loc=mean, scale=sd)
 
-    def get_probable_players_in_draft_window(self, start_pick, end_pick, prob_thresh=0.95):
+    def get_probable_players_in_draft_window(self, start_pick, end_pick, prob_thresh=0.05):
         # Return a list of players that will be available at the current pick
 
         draftable_players = []
@@ -454,15 +449,15 @@ class DraftBoard:
         # Sort undrafted players by ADP
         draft_df = self.undrafted_players.sort_values(by=cols.ADP_FIELD)
         for player_name in draft_df[cols.NAME_FIELD]:
-            earliest_pick, latest_pick = self.get_player_draft_ci(player_name, start_pick, prob_thresh)
+            earliest_pick, latest_pick = self.get_player_draft_ci(player_name, confidence=1-prob_thresh)
             if latest_pick < start_pick:
                 # Don't consider players we can't reasonably expect to draft at this position
                 continue
             elif earliest_pick > end_pick:
                 # Exit loop when you've reached first pick that we could reasonably expect to be there the next round
-                break
-            elif latest_pick > start_pick and earliest_pick <  end_pick:
-                # Consider players who would reasonably fall to this position but not the next
+                continue
+            elif latest_pick > start_pick or earliest_pick < end_pick:
+                # Consider players who have at least
                 player_info = self.get_player_info_dict(player_name)
                 player_info["Draft Prob"] = self.get_player_draft_prob(player_name, start_pick)
                 player_info["CI"] = "({0:.2f}-{1:.2f})".format(earliest_pick, latest_pick)
@@ -523,7 +518,7 @@ class DraftBoard:
 
 
 
-draftsheet = "/Users/awaldrop/Desktop/ff/fp_full_cheatsheet_input_8-3-19.xlsx"
+draftsheet = "/Users/awaldrop/Desktop/ff/draft_cheatsheet_8-7-19.xlsx"
 draft_df = pd.read_excel(draftsheet)
 
 with open("/Users/awaldrop/PycharmProjects/fantasy_draft_tools/draft_configs/LOG.yaml", "r") as stream:
@@ -535,22 +530,18 @@ db = DraftBoard(draft_df, league_config)
 
 
 print(db.my_players)
-#print(db.get_current_team())
-#print(db.get_player("Derrick Henry"))
-#print(db.get_player("Ezekiel Elliott"))
-#print(db.get_player("Aaron Rodgers"))
-#print(db.get_player("Andrew Luck"))
-#print(db.get_player("Dalvin Cook"))
 
 t = db.get_current_team()
 t.simulate_n_seasons(10000)
 print(t.get_summary_dict())
 print(db.next_draft_slot_up)
-#print(db.get_player("Dalvin Cook").simulate_n_seasons(10))
-print(db.get_next_draft_pick_pos(1, curr_pick=25))
+print(db.get_next_draft_pick_pos(3, curr_pick=4))
 
-print(db.get_player_draft_prob("Melvin Gordon", 4))
+print(db.get_player_draft_ci("Melvin Gordon", 0.5))
+print(db.get_player_draft_ci("Christian McCaffrey", 0.5))
+print(db.get_player_draft_ci("Saquon Barkley", 0.7))
 
 pd.set_option('display.max_columns', None)
-print(db.get_probable_players_in_draft_window(8, 24)[[cols.NAME_FIELD, "Draft Prob", "CI", cols.ADP_FIELD, cols.VORP_FIELD]])
+print(db.get_probable_players_in_draft_window(24, 48)[[cols.NAME_FIELD, "Draft Prob", "CI", cols.ADP_FIELD, cols.VORP_FIELD]])
 
+print(db.get_probable_players_in_draft_window(48, 72)[[cols.NAME_FIELD, "Draft Prob", "CI", cols.ADP_FIELD, cols.VORP_FIELD]])
