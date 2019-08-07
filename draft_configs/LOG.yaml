@@ -2,10 +2,13 @@ global:
   pos: ["QB", "RB", "WR", "TE"]
   season: 2019
 
+adp:
+  league_format: half-ppr
+
 projections:
   sources: ["CBS", "ESPN", "FantasyData", "FantasyPros",
             "FantasySharks", "FFToday", "FleaFlicker", "NumberFire",
-            "Yahoo","FantasyFootballNerd", "NFL", "RTSports", "Walterfootball"]
+            "Yahoo", "NFL", "RTSports", "Walterfootball"]
   type: "average"
 scoring:
   pass:
@@ -30,7 +33,7 @@ scoring:
     rush_200_yds : 8
   rec:
     all_pos : TRUE
-    rec : 0
+    rec : 0.5
     rec_yds : 0.1
     rec_tds : 6
     rec_40_yds : 0
@@ -112,6 +115,7 @@ draft:
   league_size: 12
   team_size: 14
   flex_pos: ["RB", "WR"]
+  adp_degrees_freedom: 10
   start:
     QB: 1
     RB: 2
@@ -128,3 +132,6 @@ draft:
     RB: 7
     WR: 7
     TE: 1
+
+simulation:
+  num_sim_seaons : 1000
