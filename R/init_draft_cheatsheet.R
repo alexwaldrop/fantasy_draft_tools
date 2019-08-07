@@ -54,7 +54,7 @@ my_projections[["My Picks"]] <- rep(NA, nrow(my_projections))
 my_projections[["Potential Pick"]] <- rep(NA, nrow(my_projections))
 
 # Reorder columns 
-req_columns = c("Name", "Drafted", "My Picks", "Potential Pick")
+req_columns = c("id", "Name", "Drafted", "My Picks", "Potential Pick")
 exclude_cols = c("first_name", "last_name", "id", "avg_type")
 include_cols = colnames(my_projections)[-which(colnames(my_projections) %in% c(req_columns, exclude_cols))]
 final_proj = select(my_projections, c(req_columns, include_cols))
