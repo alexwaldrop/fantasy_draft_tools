@@ -83,9 +83,3 @@ def match_reference_player_name(name, pos, reference_names, reference_pos, match
 
     # If user loops through all potential matches and doesn't agree, return None
     return None
-
-
-
-
-
-
