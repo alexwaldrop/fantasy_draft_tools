@@ -1,10 +1,11 @@
+import os
 import numpy as np
 import math
 from copy import deepcopy
 import logging
 import pandas as pd
 import scipy.stats as sp
-import random
+from multiprocessing import Process, Value, Lock, Queue
 
 import constants as cols
 import utils
@@ -540,7 +541,7 @@ class DraftBoard:
         self.draft_df.sort_values(by=cols.ADP_FIELD, inplace=True)
 
 
-class MCMCDraftSimulator:
+class MCMCDraftTree:
     # Compare the expected outcomes from one or more players
     def __init__(self, players_to_compare, draft_board, min_player_draft_probability=0.05, max_draft_node_size=None):
 
@@ -628,14 +629,17 @@ class MCMCDraftSimulator:
             # Add player to current team
             team.draft_player(player)
 
+        # Sample from teams score probability distribution as well
+        team.simulate_n_seasons(1)
+
         # Return team after all rounds completed
         return team
 
 
 class MCMCDraftNode:
     # Node for generating random selections for a round of drafting
-    def __init__(self, possible_players, use_flat_priors=False, max_size=None):
-        self.possible_players = possible_players
+    def __init__(self, players_to_evaluate, use_flat_priors=False, max_size=None):
+        self.players_to_evaluate = players_to_evaluate
         self.use_flat_priors = use_flat_priors
         self.max_size = max_size
 
@@ -643,39 +647,89 @@ class MCMCDraftNode:
         self.init_posterior_dist()
 
         # Get names of players and cutoffs
-        self.player_names = self.possible_players[cols.NAME_FIELD].tolist()
-        self.posterior = self.possible_players["PostProb"]
+        self.player_names = self.players_to_evaluate[cols.NAME_FIELD].tolist()
+        self.posterior = self.players_to_evaluate["PostProb"]
 
     def init_posterior_dist(self):
         # Generate draft posterior probabilities of selecting players based on expected returns
 
         # Shift VORPs to be > 0 so we don't mess with probabilities
-        if self.possible_players[cols.VORP_FIELD].min() <= 0:
-            shift_dist = 0 - self.possible_players[cols.VORP_FIELD].min() + 1
-            self.possible_players[cols.VORP_FIELD] = self.possible_players[cols.VORP_FIELD] + shift_dist
+        if self.players_to_evaluate[cols.VORP_FIELD].min() <= 0:
+            shift_dist = 0 - self.players_to_evaluate[cols.VORP_FIELD].min() + 1
+            self.players_to_evaluate[cols.VORP_FIELD] = self.players_to_evaluate[cols.VORP_FIELD] + shift_dist
 
         # Set priors either to expected return or 1 if using flat priors when comparing players equally at a position
-        self.possible_players["Prior"] = self.possible_players[cols.VORP_FIELD] * self.possible_players["Draft Prob"] if not self.use_flat_priors else 1
-        self.possible_players.sort_values(by="Prior", ascending=False, inplace=True)
+        self.players_to_evaluate["Prior"] = self.players_to_evaluate[cols.VORP_FIELD] * self.players_to_evaluate["Draft Prob"] if not self.use_flat_priors else 1
+        self.players_to_evaluate.sort_values(by="Prior", ascending=False, inplace=True)
 
         # Subset to include only top choices if max size set
         if self.max_size is not None:
-            self.possible_players = self.possible_players.iloc[0:self.max_size].copy()
+            self.players_to_evaluate = self.players_to_evaluate.iloc[0:self.max_size].copy()
 
         # Generate probability each player should be drafted given expected return
-        self.possible_players["PostProb"] = self.possible_players["Prior"] / self.possible_players["Prior"].sum()
+        self.players_to_evaluate["PostProb"] = self.players_to_evaluate["Prior"] / self.players_to_evaluate["Prior"].sum()
 
     def sample(self):
         # Sample player from posterior distribution and return name
         return np.random.choice(self.player_names, p=self.posterior)
 
     def __str__(self):
-        return str(self.possible_players[[cols.NAME_FIELD, "Draft Prob", "CI", cols.ADP_FIELD, cols.VORP_FIELD, "PostProb"]])
+        return str(self.players_to_evaluate[[cols.NAME_FIELD, "Draft Prob", "CI", cols.ADP_FIELD, cols.VORP_FIELD, "PostProb"]])
 
 
+class Counter(object):
+    def __init__(self, initval=0):
+        self.val = Value('i', initval)
+        self.lock = Lock()
+
+    def increment(self):
+        with self.lock:
+            self.val.value += 1
+
+    def value(self):
+        with self.lock:
+            return self.val.value
 
 
+def sample_teams(mcmc_draft_tree, num_teams, counter, output_queue):
+    # Reset numpy random seed so all threads don't return the same teams
+    np.random.seed(int.from_bytes(os.urandom(4), byteorder='little'))
 
+    teams = []
+    for i in range(num_teams):
+        if counter.value() % 1000 == 0 and counter.value() != 0:
+            logging.info("Sampled {0} teams...".format(counter.value()))
+            print("Sampled {0} teams...".format(counter.value()))
+        teams.append(mcmc_draft_tree.sample())
+        counter.increment()
+
+    # Add teams to shared queue
+    output_queue.put(teams)
+
+
+def do_mcmc_sample_parallel(mcmc_draft_tree, num_samples, num_threads):
+    # Perform MCMC sampling in parallel
+    counter = Counter(0)
+    results_q = Queue()
+    samples_per_thread = int(math.ceil(num_samples/float(num_threads)))
+    procs = []
+    teams = []
+
+    # Kick off thread workers to sample teams from distribution
+    for i in range(num_threads):
+        procs.append(Process(target=sample_teams,
+                             args=(mcmc_draft_tree,
+                                   samples_per_thread,
+                                   counter,
+                                   results_q)))
+        procs[i].start()
+
+    # Add results as they finish
+    for p in procs: teams.extend(results_q.get())
+
+    # Wait for threads to complete and return teams
+    for p in procs: p.join()
+    return teams
 
 
 draftsheet = "/Users/awaldrop/Desktop/ff/draft_cheatsheet_8-7-19.xlsx"
@@ -712,17 +766,19 @@ pd.set_option('display.max_columns', None)
 
 my_players = db.potential_picks[cols.NAME_FIELD].tolist()
 
-x = MCMCDraftSimulator(my_players, db, max_draft_node_size=75)
+x = MCMCDraftTree(my_players, db, max_draft_node_size=75)
 #x = MCMCDraftSimulator(my_players, db)
 curr_round = x.start_round
 
-teams = []
-for i in range(1, 10000):
-    if i % 100 == 0:
-        print("Done {0} teams!".format(i))
-    team = x.sample()
-    team.simulate_n_seasons(1)
-    teams.append(team.get_summary_dict())
+teams = do_mcmc_sample_parallel(x, num_samples=50000, num_threads=8)
+teams = [team.get_summary_dict() for team in teams]
+
+#for i in range(1, 10000):
+#    if i % 100 == 0:
+#        print("Done {0} teams!".format(i))
+#    team = x.sample()
+#    team.simulate_n_seasons(1)
+#    teams.append(team.get_summary_dict())
 
 df = pd.DataFrame(teams)
 #df.sort_values(by="sim_starters_pts_avg", ascending=False, inplace=True)
@@ -740,4 +796,4 @@ for player in my_players:
     prob = df[player][0:cutoff_num].sum()/cutoff_num
     print("{0}: {1}".format(player, prob))
 
-df.to_excel("/Users/awaldrop/Desktop/test_round5.xlsx")
+df.to_excel("/Users/awaldrop/Desktop/test_round6.xlsx")
