@@ -4,6 +4,7 @@ from copy import deepcopy
 import logging
 import pandas as pd
 import scipy.stats as sp
+import random
 
 import constants as cols
 import utils
@@ -26,7 +27,7 @@ class Player:
         return np.clip(sim_pts, a_min=self.vorp_baseline, a_max=None)
 
     def __eq__(self, player):
-        return self.name == player.name
+        return self.name == player.name and self.pos == player.pos
 
     def __deepcopy__(self, memodict={}):
         return Player(self.name, self.pos, self.points, self.points_sd, self.vorp)
@@ -105,7 +106,7 @@ class Team:
     def get_players(self, positions):
         if not isinstance(positions, list):
             positions = [positions]
-        return [player for player in self.players if player in positions]
+        return [player for player in self.players if player.pos in positions]
 
     def draft_player(self, player):
         if player in self.players:
@@ -113,14 +114,18 @@ class Team:
         # Add to list of players
         self.players.append(player)
 
-    def can_add_player(self, pos):
+    def can_add_player(self, player):
         # Check if adding player exceeds team size
-        if self.size + 1 > self.league_config["team_size"]:
+        if self.size + 1 > self.league_config["draft"]["team_size"]:
+            return False
+
+        # Check to see if player already on team
+        if player in self.players:
             return False
 
         # Check if adding player exceeds team positional limit
-        num_at_pos = len(self.get_players(pos))
-        max_at_pos = self.league_config["draft"]["max"][pos]
+        num_at_pos = len(self.get_players(player.pos))
+        max_at_pos = self.league_config["draft"]["max"][player.pos]
 
         # Return false if adding player will exceed position limit
         if num_at_pos + 1 > max_at_pos:
@@ -129,10 +134,10 @@ class Team:
         # Check if adding player would mean other minimum position limits don't get met
         num_needed = 0
         for need_pos in self.league_config["global"]["pos"]:
-            if need_pos != pos:
+            if need_pos != player.pos:
                 # Number needed is the difference between positional min and the number you currently have at position
                 num_at_pos = len(self.get_players(need_pos))
-                num_needed += max(0, self.league_config["draft"]["min"] - num_at_pos)
+                num_needed += max(0, self.league_config["draft"]["min"][need_pos] - num_at_pos)
 
         # Return false if adding player of current position would prevent other positions getting filled
         if num_needed > self.league_config["draft"]["team_size"] - (self.size+1):
@@ -224,7 +229,7 @@ class Team:
 
 class DraftBoard:
     required_cols = [cols.NAME_FIELD, cols.POS_FIELD, cols.POINTS_FIELD, cols.POINTS_SD_FIELD,
-                     cols.VORP_FIELD, cols.ADP_FIELD, cols.ADP_SD_FIELD, cols.ADP_TIMES_DRAFTED_FIELD,
+                     cols.VORP_FIELD, cols.ADP_FIELD, cols.ADP_SD_FIELD,
                      cols.DRAFT_STATUS, cols.MY_PICKS, cols.RUN_SIM_DRAFT]
 
     def __init__(self, draft_df, league_config):
@@ -245,6 +250,9 @@ class DraftBoard:
         utils.drop_duplicates_and_warn(self.draft_df,
                                        id_col="DupID",
                                        warn_msg="Draft board contains duplicate players!")
+
+        # Remove players missing required data
+        self._remove_players_missing_data()
 
         # Validate draft status
         self._validate_draft_status()
@@ -314,6 +322,19 @@ class DraftBoard:
         if errors:
             raise IOError("Improperly formatted draft board! See above errors")
 
+    def _remove_players_missing_data(self):
+        # Remove players with missing data in any required columns (usually few/no projections for weird players)
+        to_remove = []
+        col_to_check = [col for col in self.required_cols if col not in [cols.DRAFT_STATUS, cols.MY_PICKS, cols.RUN_SIM_DRAFT]]
+        for col in col_to_check:
+            to_remove += self.draft_df[pd.isnull(self.draft_df[col])][cols.NAME_FIELD].tolist()
+
+        # Log warning and remove players missing data
+        logging.warning("Following players have missing "
+                        "data and will"
+                        " be removed:\n{0}".format(self.draft_df[self.draft_df[cols.NAME_FIELD].isin(to_remove)]))
+        self.draft_df = self.draft_df[~self.draft_df[cols.NAME_FIELD].isin(to_remove)].copy()
+
     def _validate_draft_status(self):
 
         drafted_players = self.drafted_players[cols.NAME_FIELD].tolist()
@@ -351,12 +372,6 @@ class DraftBoard:
         if errors:
             raise IOError("Invalid draft board! See above errors")
 
-    def _check_player_exists(self, player_name):
-        # Check to see if player actually exists
-        if player_name not in self.draft_df[cols.NAME_FIELD].tolist():
-            logging.error("Cannot get {0}! Player does not exist on draft board!".format(player_name))
-            raise IOError("Cannot get {0}! Player does not exist on draft board!".format(player_name))
-
     def _generate_autodraft_slots(self):
         # Generate autodraft slots based on current draft status and ADP
 
@@ -375,9 +390,15 @@ class DraftBoard:
                                                                                curr_pick=self.num_drafted+1)
         self.draft_df[cols.DRAFT_SLOT_FIELD] = pd.Series(draft_slots).values
 
+    def check_player_exists(self, player_name):
+        # Check to see if player actually exists
+        if player_name not in self.draft_df[cols.NAME_FIELD].tolist():
+            logging.error("Cannot get {0}! Player does not exist on draft board!".format(player_name))
+            raise IOError("Cannot get {0}! Player does not exist on draft board!".format(player_name))
+
     def get_player_info_dict(self, player_name):
         # Check player exists
-        self._check_player_exists(player_name)
+        self.check_player_exists(player_name)
         return self.draft_df[self.draft_df[cols.NAME_FIELD] == player_name].to_dict(orient="records")[0]
 
     def get_current_team(self):
@@ -398,7 +419,7 @@ class DraftBoard:
 
     def draft_player(self, player_name, on_my_team=True):
         # Check player exists
-        self._check_player_exists(player_name)
+        self.check_player_exists(player_name)
 
         # Check to see if player has already been drafted
         if player_name in self.drafted_players[cols.NAME_FIELD].tolist():
@@ -462,6 +483,8 @@ class DraftBoard:
                 player_info["Draft Prob"] = self.get_player_draft_prob(player_name, start_pick)
                 player_info["CI"] = "({0:.2f}-{1:.2f})".format(earliest_pick, latest_pick)
                 draftable_players.append(player_info)
+
+        # Calculate expected returns for each player
         return pd.DataFrame(draftable_players).sort_values(by=cols.VORP_FIELD, ascending=False)
 
     def get_best_available_players_in_window(self, pick_start, pick_end=None, pos_group_size=8):
@@ -517,6 +540,143 @@ class DraftBoard:
         self.draft_df.sort_values(by=cols.ADP_FIELD, inplace=True)
 
 
+class MCMCDraftSimulator:
+    # Compare the expected outcomes from one or more players
+    def __init__(self, players_to_compare, draft_board, min_player_draft_probability=0.05, max_draft_node_size=None):
+
+        # Draft board to use for simulation
+        self.draft_board = draft_board
+
+        # Players for comparing draft outcomes if you draft them with next pick
+        self.players_to_compare = players_to_compare
+        if not isinstance(players_to_compare, list):
+            self.players_to_compare = [self.players_to_compare]
+
+        # Check to make sure players actually exist
+        for player in players_to_compare:
+            self.draft_board.check_player_exists(player)
+
+        # Current team from which to simulate draft
+        self.curr_team = self.draft_board.get_current_team()
+
+        # Draft slot to simulate draft from
+        self.draft_slot = self.draft_board.next_draft_slot_up
+
+        # Current draft round from which to simulate
+        self.start_round = self.curr_team.size + 1
+
+        # Max draft rounds
+        self.max_draft_rounds = draft_board.league_config["draft"]["team_size"]
+
+        # Min probablity for considering whether to draft a player within a given window
+        self.min_player_draft_probability = min_player_draft_probability
+
+        # Maximum number of players to consider in at each draft node
+        self.max_draft_node_size = max_draft_node_size
+
+        # Initialize board of
+        self.draft_tree = self.init_mcmc_tree()
+
+    def init_mcmc_tree(self):
+        logging.info("Building MCMC draft tree...")
+        draft_slot_board = {}
+        curr_round = self.start_round
+        curr_pick  = len(self.draft_board.drafted_players)
+        first_node = True
+        while curr_round <= self.max_draft_rounds and curr_pick < self.draft_board.total_players:
+
+            # Get players that will likely be drafted within current window
+            curr_pick = self.draft_board.get_next_draft_pick_pos(self.draft_slot, curr_pick)
+            next_pick = self.draft_board.get_next_draft_pick_pos(self.draft_slot, curr_pick+1)
+            possible_players = self.draft_board.get_probable_players_in_draft_window(curr_pick,
+                                                                                     next_pick-1,
+                                                                                     prob_thresh=self.min_player_draft_probability)
+
+            # If the first node, select only the players you're looking to compare
+            if first_node:
+                possible_players = possible_players[possible_players[cols.NAME_FIELD].isin(self.players_to_compare)]
+
+            # Create MCMC decisions tree node for sampling players for this round
+            node = MCMCDraftNode(possible_players, use_flat_priors=first_node, max_size=self.max_draft_node_size)
+            draft_slot_board[str(curr_round)] = node
+
+            logging.debug("Round {0} player distribution ({1}-{2}) :\n{3}".format(curr_round,
+                                                                                  curr_pick,
+                                                                                  next_pick-1,
+                                                                                  node))
+
+            print("Building round {0} player distribution ({1}-{2})...".format(curr_round,
+                                                                               curr_pick,
+                                                                               next_pick-1))
+
+            # Move onto next round and increment current pick
+            curr_round += 1
+            curr_pick = next_pick
+            first_node = False
+
+        return draft_slot_board
+
+    def sample(self):
+        # Sample a team from the draft tree
+        team = deepcopy(self.curr_team)
+        for draft_round in range(self.start_round, self.max_draft_rounds+1):
+            # Keep drawing from player distribution at current round until you find a player
+            # you can add to the current team
+            player = self.draft_board.get_player(self.draft_tree[str(draft_round)].sample())
+            while not team.can_add_player(player):
+                player = self.draft_board.get_player(self.draft_tree[str(draft_round)].sample())
+            # Add player to current team
+            team.draft_player(player)
+
+        # Return team after all rounds completed
+        return team
+
+
+class MCMCDraftNode:
+    # Node for generating random selections for a round of drafting
+    def __init__(self, possible_players, use_flat_priors=False, max_size=None):
+        self.possible_players = possible_players
+        self.use_flat_priors = use_flat_priors
+        self.max_size = max_size
+
+        # Initialize prior probablities for drafting players in the round
+        self.init_posterior_dist()
+
+        # Get names of players and cutoffs
+        self.player_names = self.possible_players[cols.NAME_FIELD].tolist()
+        self.posterior = self.possible_players["PostProb"]
+
+    def init_posterior_dist(self):
+        # Generate draft posterior probabilities of selecting players based on expected returns
+
+        # Shift VORPs to be > 0 so we don't mess with probabilities
+        if self.possible_players[cols.VORP_FIELD].min() <= 0:
+            shift_dist = 0 - self.possible_players[cols.VORP_FIELD].min() + 1
+            self.possible_players[cols.VORP_FIELD] = self.possible_players[cols.VORP_FIELD] + shift_dist
+
+        # Set priors either to expected return or 1 if using flat priors when comparing players equally at a position
+        self.possible_players["Prior"] = self.possible_players[cols.VORP_FIELD] * self.possible_players["Draft Prob"] if not self.use_flat_priors else 1
+        self.possible_players.sort_values(by="Prior", ascending=False, inplace=True)
+
+        # Subset to include only top choices if max size set
+        if self.max_size is not None:
+            self.possible_players = self.possible_players.iloc[0:self.max_size].copy()
+
+        # Generate probability each player should be drafted given expected return
+        self.possible_players["PostProb"] = self.possible_players["Prior"] / self.possible_players["Prior"].sum()
+
+    def sample(self):
+        # Sample player from posterior distribution and return name
+        return np.random.choice(self.player_names, p=self.posterior)
+
+    def __str__(self):
+        return str(self.possible_players[[cols.NAME_FIELD, "Draft Prob", "CI", cols.ADP_FIELD, cols.VORP_FIELD, "PostProb"]])
+
+
+
+
+
+
 
 draftsheet = "/Users/awaldrop/Desktop/ff/draft_cheatsheet_8-7-19.xlsx"
 draft_df = pd.read_excel(draftsheet)
@@ -542,6 +702,42 @@ print(db.get_player_draft_ci("Christian McCaffrey", 0.5))
 print(db.get_player_draft_ci("Saquon Barkley", 0.7))
 
 pd.set_option('display.max_columns', None)
-print(db.get_probable_players_in_draft_window(24, 48)[[cols.NAME_FIELD, "Draft Prob", "CI", cols.ADP_FIELD, cols.VORP_FIELD]])
+#print(db.get_probable_players_in_draft_window(24, 48)[[cols.NAME_FIELD, "Draft Prob", "CI", cols.ADP_FIELD, cols.VORP_FIELD]])
+#print(db.get_probable_players_in_draft_window(24, 25)[[cols.NAME_FIELD, "Draft Prob", "CI", cols.ADP_FIELD, cols.VORP_FIELD, "ExpReturn", "Prob", "ProbRange"]])
 
-print(db.get_probable_players_in_draft_window(48, 72)[[cols.NAME_FIELD, "Draft Prob", "CI", cols.ADP_FIELD, cols.VORP_FIELD]])
+#print(db.get_probable_players_in_draft_window(48, 72)[[cols.NAME_FIELD, "Draft Prob", "CI", cols.ADP_FIELD, cols.VORP_FIELD]])
+
+#x = MCMCDraftSimulator(db, 1)
+#print(x.draft_slot_board)
+
+my_players = db.potential_picks[cols.NAME_FIELD].tolist()
+
+x = MCMCDraftSimulator(my_players, db, max_draft_node_size=75)
+#x = MCMCDraftSimulator(my_players, db)
+curr_round = x.start_round
+
+teams = []
+for i in range(1, 10000):
+    if i % 100 == 0:
+        print("Done {0} teams!".format(i))
+    team = x.sample()
+    team.simulate_n_seasons(1)
+    teams.append(team.get_summary_dict())
+
+df = pd.DataFrame(teams)
+#df.sort_values(by="sim_starters_pts_avg", ascending=False, inplace=True)
+df.sort_values(by="sim_team_vorp_avg", ascending=False, inplace=True)
+
+def player_on_team(row, player, draft_spot):
+    team = row['players'].split(",")
+    return team[draft_spot].strip() == player
+
+
+cutoff_num = int(math.ceil(len(df)/len(my_players)))
+player_prob_df = df.iloc[0:cutoff_num]
+for player in my_players:
+    df[player] = df.apply(player_on_team, axis=1, player=player, draft_spot=curr_round-1)
+    prob = df[player][0:cutoff_num].sum()/cutoff_num
+    print("{0}: {1}".format(player, prob))
+
+df.to_excel("/Users/awaldrop/Desktop/test_round5.xlsx")
