@@ -59,6 +59,17 @@ def match_reference_player_name(name, pos, reference_names, reference_pos, match
             # Otherwise add match results to list of names
             match_results.append((norm_ref_name, match_ratio))
 
+    elif norm_name in norm_reference_names and pos != norm_reference_names[norm_name][1]:
+        # Raise error if there's a player that matches but for different position. That shouldn't happen.
+        logging.error("Player name matched but we disagree on position:\n"
+                      "Name: {0} ({1})\n"
+                      "Ref Name: {2} ({3})".format(name,
+                                                   pos,
+                                                   norm_reference_names[norm_name][0],
+                                                   norm_reference_names[norm_name][1]))
+        raise DraftException("Player name matches but positional disagreement between "
+                             "projections/ADP. See log for details.")
+
     # If no matches found > match threshold, ask user if any matches are correct
     match_results = sorted(match_results, key=lambda x: x[1], reverse=True)
     for match_result in match_results:
