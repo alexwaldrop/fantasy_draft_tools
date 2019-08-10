@@ -884,7 +884,7 @@ class MCMCResultAnalyzer:
             results[player] = (team_val-replacement_val)/std_devs[player]
         return results
 
-    def plot_density(self, optimize_for, filename, max_teams=100000):
+    def plot_density(self, optimize_for, filename, max_teams=10000):
         self.check_optimze_arg(optimize_for)
         player_dict = {}
         for player in self.players_to_evaluate:
