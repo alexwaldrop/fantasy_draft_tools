@@ -5,11 +5,34 @@ from copy import deepcopy
 import logging
 import pandas as pd
 import scipy.stats as sp
+from collections import OrderedDict
 from multiprocessing import Process, Value, Lock, Queue
+import json
+import yaml
 
 import constants as cols
 import utils
-import yaml
+
+class EmpiricalInjuryModel:
+    default_data_file = "/Users/awaldrop/PycharmProjects/fantasy_draft_tools/data/player_injury_data.json"
+    def __init__(self, league_config, injury_data_file=None):
+        self.league_config = league_config
+
+        # Read in injury data from file
+        injury_data_file = self.default_data_file if injury_data_file is None else injury_data_file
+        with open(injury_data_file, "r") as fh:
+            self.injury_data = json.load(fh)
+
+        for pos in self.league_config["global"]["pos"]:
+            if pos not in self.injury_data:
+                err_msg = "Invalid Risk Model! Missing required position: {0}".format(pos)
+                logging.error(err_msg)
+                raise utils.DraftException(err_msg)
+            self.injury_data[pos] = np.array(self.injury_data[pos])
+
+    def sample(self, pos):
+        return np.random.choice(self.injury_data[pos])
+
 
 class Player:
     def __init__(self, name, pos, points, points_sd, vorp):
@@ -20,9 +43,30 @@ class Player:
         self.vorp = vorp
         self.vorp_baseline = self.points - self.vorp
 
-    def simulate_n_seasons(self, n=1000):
+    def simulate_n_seasons(self, n=1000, injury_risk_model=None):
         # Simulate some number of seasons for the player
         sim_pts = np.random.normal(self.points, self.points_sd, n)
+
+        if injury_risk_model is not None and self.vorp > 0:
+            # Simulate missed games each season by sampling from risk model
+            for i in range(len(sim_pts)):
+                if sim_pts[i] < self.vorp_baseline:
+                    #print("{0} Doesn't miss any games cuz he sucks".format(self.name))
+                    # Don't sample injury if below replacement level (they'd be replaced even if not injured)
+                    continue
+
+                # Sample the number of games the player will miss from risk injury model
+                games_missed = injury_risk_model.sample(self.pos)
+
+                # Don't do anything if player misses no games that season
+                if games_missed == 0:
+                    continue
+
+                #print("{0} Missing {1} games and score was {2}".format(self.name, games_missed, sim_pts[i]))
+                # Recompute season score with replacement player subbing for missed games
+                sim_pts[i] = (sim_pts[i]/16)*(16-games_missed) + ((self.vorp_baseline/16)*games_missed)
+                #sim_pts[i] = (sim_pts[i] / 16) * (16 - games_missed)
+                #print("But not its {0}".format(sim_pts[i]))
 
         # Replace sub-replacement seasons with replacement-level player
         return np.clip(sim_pts, a_min=self.vorp_baseline, a_max=None)
@@ -146,14 +190,14 @@ class Team:
 
         return True
 
-    def simulate_n_seasons(self, n):
+    def simulate_n_seasons(self, n, injury_risk_model=None):
         # Simulate N number of seasons for each player on team
 
         # Just return if no players exist
         if not self.players:
             return
 
-        sim_results_points = np.array([player.simulate_n_seasons(n) for player in self.players])
+        sim_results_points = np.array([player.simulate_n_seasons(n, injury_risk_model) for player in self.players])
 
         # Get simulated VORPs for each player
         sim_results_vorp = np.array([sim_results_points[i,:] - self.players[i].vorp_baseline for i in range(len(self.players))])
@@ -207,7 +251,7 @@ class Team:
                                    "sim_starters_pts_95pct": np.sort(sim_points_starters)[percentile_indices[1]]}
 
     def get_summary_dict(self):
-        team_dict = {}
+        team_dict = OrderedDict()
         team_dict["players"] = ", ".join([player.name for player in self.players])
         team_dict["starters"] = ", ".join([player.name for player in self.starters])
         team_dict["player_points"] = ", ".join([str(int(player.points)) for player in self.players])
@@ -397,6 +441,9 @@ class DraftBoard:
             logging.error("Cannot get {0}! Player does not exist on draft board!".format(player_name))
             raise IOError("Cannot get {0}! Player does not exist on draft board!".format(player_name))
 
+    def is_player_drafted(self, player_name):
+        return player_name in self.drafted_players[cols.NAME_FIELD].tolist()
+
     def get_player_info_dict(self, player_name):
         # Check player exists
         self.check_player_exists(player_name)
@@ -543,7 +590,7 @@ class DraftBoard:
 
 class MCMCDraftTree:
     # Compare the expected outcomes from one or more players
-    def __init__(self, players_to_compare, draft_board, min_player_draft_probability=0.05, max_draft_node_size=None):
+    def __init__(self, players_to_compare, draft_board, min_player_draft_probability=0.05, max_draft_node_size=None, injury_risk_model=None):
 
         # Draft board to use for simulation
         self.draft_board = draft_board
@@ -552,10 +599,6 @@ class MCMCDraftTree:
         self.players_to_compare = players_to_compare
         if not isinstance(players_to_compare, list):
             self.players_to_compare = [self.players_to_compare]
-
-        # Check to make sure players actually exist
-        for player in players_to_compare:
-            self.draft_board.check_player_exists(player)
 
         # Current team from which to simulate draft
         self.curr_team = self.draft_board.get_current_team()
@@ -575,8 +618,40 @@ class MCMCDraftTree:
         # Maximum number of players to consider in at each draft node
         self.max_draft_node_size = max_draft_node_size
 
+        # Validate players you want to compare to make sure you actually can add them to your team
+        # and that they aren't already drafted
+        self.validate_players_to_compare()
+
+        # Injury risk model for simulating games missed
+        self.injury_risk_model = injury_risk_model
+
         # Initialize board of
         self.draft_tree = self.init_mcmc_tree()
+
+    def validate_players_to_compare(self):
+        # Check to make sure players actually exist and they're not already drafted
+        players_to_remove = []
+        for player in self.players_to_compare:
+            self.draft_board.check_player_exists(player)
+            if self.draft_board.is_player_drafted(player):
+                logging.error("Invalid MCMCTree! Player to compare has already been drafted: {0}".format(player))
+                raise utils.DraftException(
+                    "Invalid MCMCTree! Player to compare has already been drafted: {0}".format(player))
+            # Check to see if player position can even be added to team
+            player = self.draft_board.get_player(player)
+            if not self.curr_team.can_add_player(player):
+                logging.warning("Dropping {0} from list of players to "
+                                "consider as team can't add another {1}".format(player.name,
+                                                                                player.pos))
+                # Add to list of players to remove
+                players_to_remove.append(player.name)
+
+        # Remove players that don't need to be compared because they can't be added
+        for player in players_to_remove: self.players_to_compare.remove(player)
+        if len(self.players_to_compare) == 0:
+            logging.error("Invalid MCMCTree! None of the players to compare could be added to your team!")
+            raise utils.DraftException(logging.error("Invalid MCMCTree! None of the players "
+                                                     "to compare could be added to your team!"))
 
     def init_mcmc_tree(self):
         logging.info("Building MCMC draft tree...")
@@ -587,11 +662,12 @@ class MCMCDraftTree:
         while curr_round <= self.max_draft_rounds and curr_pick < self.draft_board.total_players:
 
             # Get players that will likely be drafted within current window
+            draft_prob = 0 if first_node else self.min_player_draft_probability
             curr_pick = self.draft_board.get_next_draft_pick_pos(self.draft_slot, curr_pick)
             next_pick = self.draft_board.get_next_draft_pick_pos(self.draft_slot, curr_pick+1)
             possible_players = self.draft_board.get_probable_players_in_draft_window(curr_pick,
                                                                                      next_pick-1,
-                                                                                     prob_thresh=self.min_player_draft_probability)
+                                                                                     prob_thresh=draft_prob)
 
             # If the first node, select only the players you're looking to compare
             if first_node:
@@ -606,9 +682,9 @@ class MCMCDraftTree:
                                                                                   next_pick-1,
                                                                                   node))
 
-            print("Building round {0} player distribution ({1}-{2})...".format(curr_round,
-                                                                               curr_pick,
-                                                                               next_pick-1))
+            print("Building round {0} player distribution ({1}-{2}):".format(curr_round,
+                                                                             curr_pick,
+                                                                             next_pick-1))
 
             # Move onto next round and increment current pick
             curr_round += 1
@@ -630,7 +706,7 @@ class MCMCDraftTree:
             team.draft_player(player)
 
         # Sample from teams score probability distribution as well
-        team.simulate_n_seasons(1)
+        team.simulate_n_seasons(1, self.injury_risk_model)
 
         # Return team after all rounds completed
         return team
@@ -732,68 +808,139 @@ def do_mcmc_sample_parallel(mcmc_draft_tree, num_samples, num_threads):
     return teams
 
 
-draftsheet = "/Users/awaldrop/Desktop/ff/draft_cheatsheet_8-7-19.xlsx"
+class MCMCResultAnalyzer:
+    # Field on which to optimize
+    optimization_fields = [cols.SIM_STARTERS_PTS, cols.SIM_TEAM_VORP, cols.SIM_COMPOSITE_SCORE, "Sharpe"]
+
+    def __init__(self, players_to_evaluate, curr_draft_round, mcmc_teams, starter_weight=0.5, team_weight=0.5):
+        # Analyze results of MCMC to determine best position
+        self.players_to_evaluate = players_to_evaluate
+        self.starter_weight = starter_weight
+        self.team_weight = team_weight
+        if not self.starter_weight + self.team_weight == 1.0:
+            raise utils.DraftException("MCMCAnalyzer weights must add up to 1! "
+                                 "Current weigths: {0} and {1}".format(starter_weight, team_weight))
+        self.curr_round = curr_draft_round
+        self.results = self.init_results_df(mcmc_teams)
+
+    def init_results_df(self, mcmc_teams):
+        # Convert results to dataframe
+        results = [team.get_summary_dict() for team in mcmc_teams]
+        results = pd.DataFrame(results)
+
+        def player_on_team(row, player, draft_spot):
+            team = row['players'].split(",")
+            return team[draft_spot].strip() == player
+
+        # Specify which player to evaluate was drafted by each simulated team
+        for player in self.players_to_evaluate:
+            results[player] = results.apply(player_on_team,
+                                            axis=1,
+                                            player=player,
+                                            draft_spot=self.curr_round - 1)
+
+        # Compute combined utiltiy score for each team taking a weighted average of z-scores
+        def z_score(df, col):
+            return (df[col] - df[col].mean())/df[col].std()
+
+        starters_z = "{0}_z".format(cols.SIM_STARTERS_PTS)
+        team_z     = "{0}_z".format(cols.SIM_TEAM_VORP)
+        results[starters_z] = z_score(results, cols.SIM_STARTERS_PTS)
+        results[team_z] = z_score(results, cols.SIM_TEAM_VORP)
+        results[cols.SIM_COMPOSITE_SCORE] = results[starters_z]*self.starter_weight + results[team_z]*self.team_weight
+        results.sort_values(by=cols.SIM_COMPOSITE_SCORE, ascending=False, inplace=True)
+        return results
+
+    def check_optimze_arg(self, opt_arg):
+        # Throw error if optimization arg isn't valid
+        if opt_arg not in self.optimization_fields:
+            err_msg = "Invalid value type '{0}'! " \
+                     "Options: {1}".format(opt_arg, ", ".join(self.optimization_fields))
+            logging.error(err_msg)
+            raise utils.DraftException(err_msg)
+
+    def get_comparison_probs(self, optimize_for):
+        self.check_optimze_arg(optimize_for)
+        cutoff_value = int(math.ceil(len(self.results)/len(self.players_to_evaluate)))
+        results = self.results.sort_values(by=optimize_for, ascending=False).copy().iloc[0:cutoff_value]
+        player_results = {}
+        for player in self.players_to_evaluate:
+            player_results[player] = len(results[results[player]])/len(results)
+        return player_results
+
+    def get_expected_returns(self, optimize_for):
+        self.check_optimze_arg(optimize_for)
+        return {player: self.results[self.results[player]][optimize_for].mean() for player in self.players_to_evaluate}
+
+    def get_sharpe_ratios(self, optimize_for):
+        self.check_optimze_arg(optimize_for)
+        results = {}
+        # Compute std deviation for all players compared to get least risky option
+        std_devs = {player: self.results[self.results[player]][optimize_for].std() for player in self.players_to_evaluate}
+        replacement_player = sorted(std_devs.items(), key=lambda kv: kv[1])[0][0]
+        replacement_val = self.results[self.results[replacement_player]][optimize_for].mean()
+        for player in self.players_to_evaluate:
+            team_val = self.results[self.results[player]][optimize_for].mean()
+            results[player] = (team_val-replacement_val)/std_devs[player]
+        return results
+
+    def plot_density(self, optimize_for, filename, max_teams=100000):
+        self.check_optimze_arg(optimize_for)
+        player_dict = {}
+        for player in self.players_to_evaluate:
+            player_results  = self.results[self.results[player]][optimize_for]
+            # Downsample if enough teams are present
+            if len(player_results) > max_teams:
+                player_results = player_results.sample(max_teams)
+            player_dict[player] = player_results
+        player_df = pd.DataFrame(player_dict)
+        ax = player_df.plot.kde()
+        fig = ax.get_figure()
+        fig.savefig(filename)
+
+    def to_excel(self, filename, **kwargs):
+        self.results.to_excel(filename, **kwargs)
+
+
+
+draftsheet = "/Users/awaldrop/Desktop/ff/projections/draftboard_8-10-19.xlsx"
 draft_df = pd.read_excel(draftsheet)
 
 with open("/Users/awaldrop/PycharmProjects/fantasy_draft_tools/draft_configs/LOG.yaml", "r") as stream:
     league_config = yaml.safe_load(stream)
 
-print(league_config)
-
-db = DraftBoard(draft_df, league_config)
-
-
-print(db.my_players)
-
-t = db.get_current_team()
-t.simulate_n_seasons(10000)
-print(t.get_summary_dict())
-print(db.next_draft_slot_up)
-print(db.get_next_draft_pick_pos(3, curr_pick=4))
-
-print(db.get_player_draft_ci("Melvin Gordon", 0.5))
-print(db.get_player_draft_ci("Christian McCaffrey", 0.5))
-print(db.get_player_draft_ci("Saquon Barkley", 0.7))
-
 pd.set_option('display.max_columns', None)
-#print(db.get_probable_players_in_draft_window(24, 48)[[cols.NAME_FIELD, "Draft Prob", "CI", cols.ADP_FIELD, cols.VORP_FIELD]])
-#print(db.get_probable_players_in_draft_window(24, 25)[[cols.NAME_FIELD, "Draft Prob", "CI", cols.ADP_FIELD, cols.VORP_FIELD, "ExpReturn", "Prob", "ProbRange"]])
-
-#print(db.get_probable_players_in_draft_window(48, 72)[[cols.NAME_FIELD, "Draft Prob", "CI", cols.ADP_FIELD, cols.VORP_FIELD]])
-
-#x = MCMCDraftSimulator(db, 1)
-#print(x.draft_slot_board)
-
+db = DraftBoard(draft_df, league_config)
 my_players = db.potential_picks[cols.NAME_FIELD].tolist()
+print(my_players)
 
-x = MCMCDraftTree(my_players, db, max_draft_node_size=75)
-#x = MCMCDraftSimulator(my_players, db)
+injury_risk_model = EmpiricalInjuryModel(league_config)
+
+x = MCMCDraftTree(my_players, db, max_draft_node_size=75, injury_risk_model=injury_risk_model)
 curr_round = x.start_round
+teams = do_mcmc_sample_parallel(x, num_samples=100000, num_threads=8)
 
-teams = do_mcmc_sample_parallel(x, num_samples=50000, num_threads=8)
-teams = [team.get_summary_dict() for team in teams]
+derp = MCMCResultAnalyzer(my_players, curr_round, teams)
+derp.to_excel("/Users/awaldrop/Desktop/ff/test7.xlsx", index=False)
+derp.plot_density("sim_starters_pts_avg", "/Users/awaldrop/Desktop/test.png")
+derp.plot_density("sim_team_vorp_avg", "/Users/awaldrop/Desktop/test2.png")
+derp.plot_density("total_value", "/Users/awaldrop/Desktop/test3.png")
 
-#for i in range(1, 10000):
-#    if i % 100 == 0:
-#        print("Done {0} teams!".format(i))
-#    team = x.sample()
-#    team.simulate_n_seasons(1)
-#    teams.append(team.get_summary_dict())
+print("EXPECTED RETURNS:")
+print("Starters")
+print(derp.get_expected_returns(optimize_for=cols.SIM_STARTERS_PTS))
+print("Team VORP")
+print(derp.get_expected_returns(optimize_for=cols.SIM_TEAM_VORP))
+print("Composite score")
+print(derp.get_expected_returns(optimize_for=cols.SIM_COMPOSITE_SCORE))
+print()
+print("SHARPE")
+print(derp.get_sharpe_ratios(optimize_for=cols.SIM_STARTERS_PTS))
 
-df = pd.DataFrame(teams)
-#df.sort_values(by="sim_starters_pts_avg", ascending=False, inplace=True)
-df.sort_values(by="sim_team_vorp_avg", ascending=False, inplace=True)
+print()
+print("PROBS")
+print("Starters")
+print(derp.get_comparison_probs(optimize_for=cols.SIM_STARTERS_PTS))
+print("Composite score")
+print(derp.get_comparison_probs(optimize_for=cols.SIM_COMPOSITE_SCORE))
 
-def player_on_team(row, player, draft_spot):
-    team = row['players'].split(",")
-    return team[draft_spot].strip() == player
-
-
-cutoff_num = int(math.ceil(len(df)/len(my_players)))
-player_prob_df = df.iloc[0:cutoff_num]
-for player in my_players:
-    df[player] = df.apply(player_on_team, axis=1, player=player, draft_spot=curr_round-1)
-    prob = df[player][0:cutoff_num].sum()/cutoff_num
-    print("{0}: {1}".format(player, prob))
-
-df.to_excel("/Users/awaldrop/Desktop/test_round6.xlsx")
