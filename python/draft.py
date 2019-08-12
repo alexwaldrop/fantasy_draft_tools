@@ -535,48 +535,14 @@ class DraftBoard:
         # Calculate expected returns for each player
         return pd.DataFrame(draftable_players).sort_values(by=cols.VORP_FIELD, ascending=False)
 
-    def get_best_available_players_in_window(self, pick_start, pick_end=None, pos_group_size=8):
-        # Return list of next best available players at each position given current draft status
-
-        # Set end of window to last spot in draft if no end point specified
-        pick_end = pick_end if pick_end is not None else len(self.draft_df)
-
-        # Check to make sure start/end picks are valid
-        if pick_start > pick_end:
-            raise IOError("Start pick ({0}) cannot be greater than "
-                          "End pick ({1}) when getting best available players!".format(pick_start,
-                                                                                       pick_end))
-
-        # Get players available inside of draft window
-        draftable_df = self.draft_df[(self.draft_df[cols.DRAFT_RANK_FIELD] >= pick_start) &
-                                     (self.draft_df[cols.DRAFT_RANK_FIELD] <= pick_end)].sort_values(by=cols.VORP_RANK_FIELD)
-
-        # Get up to top-N best available players by VORP at each position
-        players = {}
-        fields = [cols.NAME_FIELD, cols.POS_FIELD, cols.POINTS_FIELD, cols.VORP_FIELD, cols.POINTS_SD_FIELD]
-        for pos in self.league_config["global"]["pos"]:
-            pos_df = draftable_df[draftable_df[cols.POS_FIELD] == pos][fields]
-            if len(pos_df) > 0:
-                num_avail = min(len(pos_df), pos_group_size)
-                pos_df = pos_df[0:num_avail]
-                players[pos] = pos_df.values.tolist()
-        return players
-
-    def get_autopick_pos_window(self, draft_slot, start_pick=1, end_pick=None):
-        # Return pick numbers for a current draft slot
-        if cols.DRAFT_RANK_FIELD not in self.draft_df.columns:
-            self._generate_autodraft_slots()
-
-        # Set end pick to last draft slot if no end specified
-        end_pick = end_pick if end_pick is not None else self.draft_df[cols.DRAFT_RANK_FIELD].max()
-
-        if end_pick > start_pick:
-            raise IOError("Invalid autodraft window specificied: end_pick {0} "
-                          "cannot be greater than start_pick {1}".format(end_pick,
-                                                                         start_pick))
-
-        picks = list(self.draft_df[self.draft_df[cols.DRAFT_SLOT_FIELD] == draft_slot][cols.DRAFT_RANK_FIELD])
-        return [x for x in picks if x >= start_pick and x <= end_pick]
+    def get_best_available(self, pos, num_to_consider=1):
+        if pos not in self.league_config["global"]["pos"]:
+            err_msg = "Can't return players from invalid position '{0}'".format(pos)
+            logging.error(err_msg)
+            raise utils.DraftException(err_msg)
+        draft_df = self.undrafted_players.sort_values(by=cols.VORP_FIELD, ascending=False)
+        draft_df = draft_df[draft_df[cols.POS_FIELD] == pos]
+        return draft_df.iloc[0:num_to_consider][cols.NAME_FIELD]
 
     def clone(self):
         return DraftBoard(self.draft_df.copy(deep=True), self.league_config)
@@ -686,6 +652,7 @@ class MCMCDraftTree:
                                                                              curr_pick,
                                                                              next_pick-1))
 
+            print(node)
             # Move onto next round and increment current pick
             curr_round += 1
             curr_pick = next_pick
@@ -902,7 +869,6 @@ class MCMCResultAnalyzer:
         self.results.to_excel(filename, **kwargs)
 
 
-
 draftsheet = "/Users/awaldrop/Desktop/ff/projections/draftboard_8-10-19.xlsx"
 draft_df = pd.read_excel(draftsheet)
 
@@ -916,7 +882,7 @@ print(my_players)
 
 injury_risk_model = EmpiricalInjuryModel(league_config)
 
-x = MCMCDraftTree(my_players, db, max_draft_node_size=75, injury_risk_model=injury_risk_model)
+x = MCMCDraftTree(my_players, db, max_draft_node_size=35, injury_risk_model=injury_risk_model)
 curr_round = x.start_round
 teams = do_mcmc_sample_parallel(x, num_samples=100000, num_threads=8)
 
