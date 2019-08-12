@@ -5,30 +5,9 @@ import logging
 import pandas as pd
 import scipy.stats as sp
 from collections import OrderedDict
-import json
 
 import constants as cols
 import utils
-
-class EmpiricalInjuryModel:
-    default_data_file = "/Users/awaldrop/PycharmProjects/fantasy_draft_tools/data/player_injury_data.json"
-    def __init__(self, league_config, injury_data_file=None):
-        self.league_config = league_config
-
-        # Read in injury data from file
-        injury_data_file = self.default_data_file if injury_data_file is None else injury_data_file
-        with open(injury_data_file, "r") as fh:
-            self.injury_data = json.load(fh)
-
-        for pos in self.league_config["global"]["pos"]:
-            if pos not in self.injury_data:
-                err_msg = "Invalid Risk Model! Missing required position: {0}".format(pos)
-                logging.error(err_msg)
-                raise utils.DraftException(err_msg)
-            self.injury_data[pos] = np.array(self.injury_data[pos])
-
-    def sample(self, pos):
-        return np.random.choice(self.injury_data[pos])
 
 
 class Player:
@@ -67,6 +46,10 @@ class Player:
 
         # Replace sub-replacement seasons with replacement-level player
         return np.clip(sim_pts, a_min=self.vorp_baseline, a_max=None)
+
+    def get_confidence_interval(self, confidence=0.95, use_vorp=True):
+        mean = self.vorp if use_vorp else self.points
+        return sp.norm.interval(confidence, loc=mean, scale=self.points_sd)
 
     def __eq__(self, player):
         return self.name == player.name and self.pos == player.pos
@@ -272,7 +255,8 @@ class Team:
 class DraftBoard:
     required_cols = [cols.NAME_FIELD, cols.POS_FIELD, cols.POINTS_FIELD, cols.POINTS_SD_FIELD,
                      cols.VORP_FIELD, cols.ADP_FIELD, cols.ADP_SD_FIELD,
-                     cols.DRAFT_STATUS, cols.MY_PICKS, cols.RUN_SIM_DRAFT]
+                     cols.DRAFT_STATUS, cols.MY_PICKS, cols.RUN_SIM_DRAFT,
+                     cols.EXCLUDE_PLAYER]
 
     def __init__(self, draft_df, league_config):
 
@@ -329,6 +313,10 @@ class DraftBoard:
         return self.draft_df[~pd.isnull(self.draft_df[cols.RUN_SIM_DRAFT])]
 
     @property
+    def exclude_players(self):
+        return self.draft_df[~pd.isnull(self.draft_df[cols.EXCLUDE_PLAYER])]
+
+    @property
     def num_drafted(self):
         return len(self.drafted_players)
 
@@ -367,7 +355,7 @@ class DraftBoard:
     def _remove_players_missing_data(self):
         # Remove players with missing data in any required columns (usually few/no projections for weird players)
         to_remove = []
-        col_to_check = [col for col in self.required_cols if col not in [cols.DRAFT_STATUS, cols.MY_PICKS, cols.RUN_SIM_DRAFT]]
+        col_to_check = [col for col in self.required_cols if col not in [cols.DRAFT_STATUS, cols.MY_PICKS, cols.RUN_SIM_DRAFT, cols.EXCLUDE_PLAYER]]
         for col in col_to_check:
             to_remove += self.draft_df[pd.isnull(self.draft_df[col])][cols.NAME_FIELD].tolist()
 
@@ -515,6 +503,8 @@ class DraftBoard:
         # Sort undrafted players by ADP
         draft_df = self.undrafted_players.sort_values(by=cols.ADP_FIELD)
         for player_name in draft_df[cols.NAME_FIELD]:
+            if len(self.exclude_players) > 0 and player_name in self.exclude_players[cols.NAME_FIELD]:
+                continue
             earliest_pick, latest_pick = self.get_player_draft_ci(player_name, confidence=1-prob_thresh)
             if latest_pick < start_pick:
                 # Don't consider players we can't reasonably expect to draft at this position
@@ -539,7 +529,22 @@ class DraftBoard:
             raise utils.DraftException(err_msg)
         draft_df = self.undrafted_players.sort_values(by=cols.VORP_FIELD, ascending=False)
         draft_df = draft_df[draft_df[cols.POS_FIELD] == pos]
-        return draft_df.iloc[0:num_to_consider][cols.NAME_FIELD]
+        # Exclude players if they've been excluded
+        if len(self.exclude_players) > 0:
+            draft_df = draft_df[~draft_df[cols.NAME_FIELD].isin(self.exclude_players[cols.NAME_FIELD])]
+        return draft_df.iloc[0:num_to_consider][cols.NAME_FIELD].tolist()
+
+    def get_auto_draft_selections(self, num_to_consider=1, team=None, ceiling_confidence=0.95):
+        # Get top-N players with highest ceiling using some statistical confidence
+        team = self.get_current_team() if team is None else team
+        best_players = []
+        for pos in self.league_config["global"]["pos"]:
+            players = self.get_best_available(pos, num_to_consider*3)
+            if team.can_add_player(self.get_player(players[0])):
+                best_players += [self.get_player(player) for player in players]
+
+        best_players = sorted(best_players, key=lambda x: x.get_confidence_interval(ceiling_confidence)[1], reverse=True)[0:num_to_consider]
+        return [player.name for player in best_players]
 
     def clone(self):
         return DraftBoard(self.draft_df.copy(deep=True), self.league_config)

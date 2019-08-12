@@ -222,9 +222,10 @@ def main():
     merged_df[cols.DRAFT_STATUS] = np.nan
     merged_df[cols.MY_PICKS] = np.nan
     merged_df[cols.RUN_SIM_DRAFT] = np.nan
+    merged_df[cols.EXCLUDE_PLAYER] = np.nan
 
     # Reorder columns
-    col_order = [cols.NAME_FIELD, cols.POS_FIELD, cols.DRAFT_STATUS, cols.MY_PICKS, cols.RUN_SIM_DRAFT]
+    col_order = [cols.NAME_FIELD, cols.POS_FIELD, cols.DRAFT_STATUS, cols.MY_PICKS, cols.RUN_SIM_DRAFT, cols.EXCLUDE_PLAYER]
     col_order += [col for col in merged_df.columns if col not in col_order]
     merged_df = merged_df[col_order]
 

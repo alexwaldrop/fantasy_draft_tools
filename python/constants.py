@@ -13,6 +13,7 @@ VORP_RANK_FIELD = "VORP Rank"
 DRAFT_STATUS = "Drafted"
 MY_PICKS = "My Picks"
 RUN_SIM_DRAFT = "Potential Pick"
+EXCLUDE_PLAYER = "Exclude Player"
 
 # Team dict fields
 TEAM_STRING_FIELD = "players"
