@@ -4,7 +4,7 @@ import math
 from copy import deepcopy
 import logging
 import pandas as pd
-from multiprocessing import Process, Value, Lock, Queue
+from multiprocessing import Process, Value, Lock, Queue, cpu_count
 import json
 import yaml
 
@@ -35,7 +35,8 @@ class EmpiricalInjuryModel:
 class DraftTree:
     # Compare the expected outcomes from one or more players
     def __init__(self, players_to_compare, draft_board, min_adp_prior=0.05,
-                 max_draft_node_size=15, injury_risk_model=None, mcmc_exploration_constant=1):
+                 max_draft_node_size=15, injury_risk_model=None, mcmc_exploration_constant=1,
+                 positional_priors=None, n_rollouts=1):
 
         # Draft board to use for simulation
         self.draft_board = draft_board
@@ -73,8 +74,42 @@ class DraftTree:
         # Factor for determining tradeoff between exploration and exploitation
         self.mcmc_exploration_constant = mcmc_exploration_constant
 
+        # Priors to attach globally to certain positions
+        self.positional_priors = positional_priors if positional_priors is not None else {pos: 1.0 for pos in self.draft_board.league_config["global"]["pos"]}
+        self.validate_positional_priors()
+
+        # Number of rollouts before using wieghts
+        self.n_rollouts = n_rollouts
+
         # Initialize board of
         self.draft_tree = self.init_mcmc_tree()
+
+    def validate_positional_priors(self):
+        if self.positional_priors is None:
+            return
+
+        # Set any missing positional priors to 1
+        for pos in self.draft_board.league_config["global"]["pos"]:
+            if pos not in self.positional_priors:
+                self.positional_priors[pos] = 1.0
+
+        errors = False
+        for pos in self.positional_priors:
+            if pos not in self.draft_board.league_config["global"]["pos"]:
+                logging.error("Invalid DraftTree! Can't set positional prior on non-existing position: {0}".format(pos))
+                errors = True
+
+            elif not isinstance(self.positional_priors[pos], float):
+                logging.error("Invalid DraftTree! {0} Positional prior is not a float!".format(pos))
+                errors = True
+
+            elif self.positional_priors[pos] > 1 or self.positional_priors[pos] < 0:
+                logging.error("Invalid DraftTree! {0} Positional prior must be between [0,1]".format(pos))
+                errors = True
+
+        # Raise error if invalid
+        if errors:
+            raise utils.DraftException("Invalid DraftTree positional priors! See error messages above for details.")
 
     def validate_players_to_compare(self):
         # Check to make sure players actually exist and they're not already drafted
@@ -117,7 +152,8 @@ class DraftTree:
                 # Sample root players without sampling from draft posterior distribution (we know they're available)
                 possible_players = self.draft_board.get_adp_prob_info(self.players_to_compare, curr_pick)
                 node = PlayerSampler(possible_players,
-                                     mcmc_exploration_constant=self.mcmc_exploration_constant)
+                                     mcmc_exploration_constant=self.mcmc_exploration_constant,
+                                     n_rollouts=self.n_rollouts)
 
             elif draft_round == self.start_round + 1 and curr_pick-last_pick-1 < len(self.players_to_compare):
                 # If one of players to compare will necessarily make it back, sample from special distribution
@@ -127,10 +163,10 @@ class DraftTree:
                 possible_players = self.draft_board.get_adp_prob_info(self.players_to_compare, curr_pick)
                 node = DraftSimSampler(possible_players,
                                        num_adv_picks_to_sim=adversary_picks_until_turn,
-                                       mcmc_exploration_constant=self.mcmc_exploration_constant)
-
+                                       mcmc_exploration_constant=self.mcmc_exploration_constant,
+                                       n_rollouts=self.n_rollouts)
             else:
-                # Otherwise get players whose 95% ADP confidence interval overlaps with current draft window
+                # Otherwise get players whose ADP confidence interval overlaps with current draft window
 
                 # If in last 3 rounds just open it up and try to find the best players
                 last_pick = 1000 if self.max_draft_rounds - draft_round <= 3 else next_pick - 1
@@ -140,24 +176,13 @@ class DraftTree:
                                                                                          prob_thresh=self.min_adp_prior)
                 # Remove players from filled team positions
                 possible_players = possible_players[~possible_players[cols.POS_FIELD].isin(self.curr_team.filled_positions)]
-                #possible_players = possible_players.sort_values(by=cols.VORP_FIELD, ascending=False)
 
-                # Remove all but top-2 TEs and QBs
-
-                # Get top-N by VORP with at least one from each position
-                #best_players = possible_players[0:self.max_draft_node_size][cols.NAME_FIELD].tolist()
-
-                # Check to see if any positions are missing
-                #pos_in_best = possible_players[possible_players[cols.NAME_FIELD].isin(best_players)][cols.POS_FIELD].unique().tolist()
-                #pos_to_fill = [pos for pos in self.draft_board.league_config["global"]["pos"] if pos not in self.curr_team.filled_positions + pos_in_best]
-                #for pos in pos_to_fill:
-                #    best_pos_player = possible_players[possible_players[cols.POS_FIELD] == pos][cols.NAME_FIELD].iloc[0]
-                #    best_players.append(best_pos_player)
-
-                # Create node for sampling from top-25
-                #best_players = possible_players[possible_players[cols.NAME_FIELD].isin(best_players)]
+                # Reduce to a smaller set of players I'd actually draft
                 best_players = self.subset_draftable_players(possible_players)
-                node = DraftSimSampler(best_players, mcmc_exploration_constant=self.mcmc_exploration_constant)
+                node = DraftSimSampler(best_players,
+                                       positional_priors=self.positional_priors,
+                                       mcmc_exploration_constant=self.mcmc_exploration_constant,
+                                       n_rollouts=self.n_rollouts)
 
             # Add node to mcmc tree
             draft_slot_board[str(draft_round)] = node
@@ -207,36 +232,6 @@ class DraftTree:
         # Return subsetted data frame
         return possible_players[possible_players[cols.NAME_FIELD].isin(best_players)]
 
-    def get_draftable_players(self, curr_pick, include_only_players=None):
-        # Get list of likely players that will be drafted that you'd actually want to draft
-
-        # Get players that will be available with > this probability
-        draft_prob = self.min_adp_prior if include_only_players is None else 0
-
-        # Define draft window as the next two picks for the current draft slot
-        curr_pick = self.draft_board.get_next_draft_pick_pos(self.draft_slot, curr_pick)
-        next_pick = self.draft_board.get_next_draft_pick_pos(self.draft_slot, curr_pick + 1)
-
-        # Get list of players that could possibly be drafted
-        possible_players = self.draft_board.get_probable_players_in_draft_window(curr_pick,
-                                                                                 next_pick - 1,
-                                                                                 prob_thresh=draft_prob)
-        # If the first node, select only the players you're looking to compare
-        if include_only_players is not None:
-            # Subset to include only the players included
-            return possible_players[possible_players[cols.NAME_FIELD].isin(include_only_players)]
-
-        # Remove players from filled positions
-        # Remove players from positions you've already filled
-        players_to_remove = []
-        for player in possible_players[cols.NAME_FIELD]:
-            if not self.curr_team.can_add_player(self.draft_board.get_player(player)):
-                players_to_remove.append(player)
-        possible_players = possible_players[~possible_players[cols.NAME_FIELD].isin(players_to_remove)].copy()
-
-        # Otherwise remove players you're not actually interested in drafting
-        return possible_players
-
     def sample(self):
         # Sample a team from the draft tree
         team = deepcopy(self.curr_team)
@@ -246,17 +241,10 @@ class DraftTree:
 
             # Sample until you find a player you can add to the current team
             exclude_players = team.player_names if team.size > 0 else []
-            try:
-                player = self.draft_board.get_player(self.draft_tree[str(draft_round)].sample(exclude_players=exclude_players,
-                                                                                              exclude_pos=full_positions))
-            except IOError:
-                print("THIS WHERE WE FAILED")
-                print("ROUND: %s" % draft_round)
-                print(", ".join(team.player_names))
-                print(self.draft_tree[str(draft_round)])
-                raise
-
+            player = self.draft_board.get_player(self.draft_tree[str(draft_round)].sample(exclude_players=exclude_players,
+                                                                                          exclude_pos=full_positions))
             while not team.can_add_player(player):
+                # Only reaosn we can't add player to team would be full position so add to list of filled positions
                 full_positions.append(player.pos)
                 player = self.draft_board.get_player(self.draft_tree[str(draft_round)].sample(exclude_players=exclude_players,
                                                                                               exclude_pos=full_positions))
@@ -265,6 +253,7 @@ class DraftTree:
             team.draft_player(player)
 
         # Sample from teams score probability distribution as well
+        #print(", ".join([x.name for x in team.starters]))
         team.simulate_n_seasons(1, self.injury_risk_model)
 
         # Compute value as average of starter and bench points
@@ -277,8 +266,15 @@ class DraftTree:
         # Return team after all rounds completed
         return team
 
+    def make_branch(self):
+        # Make a copy of self and return branch versions of all current nodes
+        branch = deepcopy(self)
+        for draft_round in branch.draft_tree:
+            branch.draft_tree[draft_round] = branch.draft_tree[draft_round].make_branch()
+        return branch
+
     def merge_branch(self, branch):
-        # Merge data from another draft tree
+        # Merge data from a branch split from draft tree
         for node in self.draft_tree:
             # If node doesn't exist merge with other node
             if node not in branch.draft_tree:
@@ -295,11 +291,24 @@ class DraftTree:
         for node in self.draft_tree:
             self.draft_tree[node].set_exploration_constant(exploration_constant)
 
+    def set_positional_priors(self, positional_priors=None):
+        # Update positional priors and broadcast to all nodes
+        if positional_priors is None:
+            self.positional_priors = {pos: 1 for pos in self.draft_board.league_config["global"]["pos"]}
+        else:
+            self.positional_priors = positional_priors
+        self.validate_positional_priors()
+
+        # Set new positional priors for any round that's sampling players other than players to compare
+        for draft_round in self.draft_tree:
+            if isinstance(self.draft_tree[draft_round], DraftSimSampler) and self.draft_tree[draft_round].num_adv_picks_to_sim is None:
+                self.draft_tree[draft_round].set_positional_priors(positional_priors)
+
 
 class PlayerSampler:
     # Special case of draft sampler that picks players uniformly from distribution
     # Assumes all players will be undrafted at time of pick
-    def __init__(self, players, mcmc_exploration_constant=1):
+    def __init__(self, players, mcmc_exploration_constant=1, n_rollouts=1):
         # Compute the absolute probability of sampling each player in distribution
         self.players = self.init_node_priors(players)
         self.players["Visits"] = 0
@@ -309,6 +318,7 @@ class PlayerSampler:
         self.total_visits = 0
         self.weight_order = None
         self.exploration_constant = mcmc_exploration_constant
+        self.n_rollouts = n_rollouts
 
     def init_node_priors(self, players):
         players = players.sort_values(by="Draft Prob").copy().reset_index()
@@ -323,8 +333,8 @@ class PlayerSampler:
                                ~(self.players[cols.POS_FIELD].isin(exclude_pos))]
 
         # Sample from unselected players first
-        if len(players[players["Visits"] == 0]) != 0:
-            return np.random.choice(players[players["Visits"] == 0][cols.NAME_FIELD])
+        if len(players[players["Visits"] < self.n_rollouts]) != 0:
+            return np.random.choice(players[players["Visits"] < self.n_rollouts][cols.NAME_FIELD])
 
         # Otherwise find player with highest weight that appears in list of valid players to sample
         self.update_weights()
@@ -342,15 +352,37 @@ class PlayerSampler:
         self.players.loc[self.players[cols.NAME_FIELD] == player_name, "Visits"] = new_visits
         self.players.loc[self.players[cols.NAME_FIELD] == player_name, "Q"] = new_value
 
+        # Update number of vists to current branch
+        curr_visits = self.players.loc[player_name, "BranchVisits"]
+        curr_value = self.players.loc[player_name, "BranchQ"]
+        new_visits = curr_visits + 1
+        new_value = (curr_visits * curr_value + team_value) / (curr_visits + 1)
+        self.players.loc[self.players[cols.NAME_FIELD] == player_name, "BranchVisits"] = new_visits
+        self.players.loc[self.players[cols.NAME_FIELD] == player_name, "BranchQ"] = new_value
+
     def update_weights(self):
         self.players["U"] = np.sqrt(2*math.log(self.total_visits)/(self.players["Visits"])) * self.players["Prior"] * self.exploration_constant
         self.players["Weights"] = (self.players["Q"]/self.players["Q"].max()) + self.players["U"]
         self.weight_order = self.players.sort_values(by="Weights", ascending=False)[cols.NAME_FIELD]
 
+    def make_branch(self):
+        # Make branched copy of self for parallel processing
+        branch = deepcopy(self)
+        branch.players["BranchVisits"] = 0
+        branch.players["BranchQ"] = 0
+        return branch
+
     def merge_branch(self, node):
-        self.players["Visits"] = self.players["Visits"] + node.players["Visits"]
-        self.players["Q"] = ((self.players["Q"]*self.total_visits) + (node.players["Q"]*node.total_visits))/(self.total_visits+node.total_visits)
-        self.total_visits = self.total_visits + node.total_visits
+        # Update Q to be weighted average score based on number of visits
+        self.players["Q"] = ((self.players["Q"]*self.players["Visits"]) +
+                             (node.players["BranchQ"]*node.players["BranchVisits"]))/(self.players["Visits"]+node.players["BranchVisits"])
+
+        # Repace NaNs caused by dividing by 0
+        self.players["Q"] = self.players["Q"].fillna(0)
+
+        # Update number of node visits and total visits
+        self.players["Visits"] = self.players["Visits"] + node.players["BranchVisits"]
+        self.total_visits = self.total_visits + node.players["BranchVisits"].sum()
 
     def set_exploration_constant(self, exploration_constant):
         self.exploration_constant = exploration_constant
@@ -365,8 +397,8 @@ class DraftSimSampler(PlayerSampler):
     # Draft aware sampler. Samples from draft posterior distribution using ADP priors
     # Also handles special case for turns when only a finite number of players will be removed
     #   Useful for turn picks (e.g. 2, 11) when you know the exact number of players to remove from pool
-    def __init__(self, players, num_adv_picks_to_sim=None, mcmc_exploration_constant=1):
-        PlayerSampler.__init__(self, players, mcmc_exploration_constant)
+    def __init__(self, players, num_adv_picks_to_sim=None, positional_priors=None, mcmc_exploration_constant=1, n_rollouts=1):
+        PlayerSampler.__init__(self, players, mcmc_exploration_constant, n_rollouts)
 
         # Number of players to remove from potential pool of players
         # If None, simluate available player pool each round based on draft probabilities
@@ -381,6 +413,10 @@ class DraftSimSampler(PlayerSampler):
             draft_probs = (1-self.players["Draft Prob"])/(1-self.players["Draft Prob"]).sum()
 
         self.draft_probs = list(zip(self.players[cols.NAME_FIELD], draft_probs))
+
+        # Priors to apply by position
+        self.positional_priors = positional_priors
+        self.players["Prior"] = self.players[cols.POS_FIELD].map(positional_priors)
 
     def sample(self, exclude_players=None, exclude_pos=None):
         drafted_players = self.simulate_draft()
@@ -406,6 +442,11 @@ class DraftSimSampler(PlayerSampler):
                                 p=self.draft_probs,
                                 size=self.num_adv_picks_to_sim)
 
+    def set_positional_priors(self, positional_priors):
+        self.positional_priors = positional_priors
+        # Update positional priors in players table
+        self.players["Priors"] = self.players[cols.POS_FIELD].map(positional_priors)
+
 
 class Counter(object):
     def __init__(self, initval=0):
@@ -427,7 +468,7 @@ def sample_teams(mcmc_draft_tree, num_teams, counter, output_queue):
 
     teams = []
     for i in range(num_teams):
-        if counter.value() % 100 == 0 and counter.value() != 0:
+        if counter.value() % 200 == 0 and counter.value() != 0:
             logging.info("Sampled {0} teams...".format(counter.value()))
             print("Sampled {0} teams...".format(counter.value()))
         teams.append(mcmc_draft_tree.sample())
@@ -444,11 +485,10 @@ def do_mcmc_draft_chain(mcmc_draft_tree, num_samples, num_chains):
     samples_per_thread = int(math.ceil(num_samples / float(num_chains)))
     chains = []
     teams = []
-    chain_trees = []
     # Kick off thread workers to sample teams from distribution
     for i in range(num_chains):
         chains.append(Process(target=sample_teams,
-                             args=(mcmc_draft_tree,
+                             args=(mcmc_draft_tree.make_branch(),
                                    samples_per_thread,
                                    counter,
                                    results_q)))
@@ -470,27 +510,27 @@ def do_mcmc_draft_chain(mcmc_draft_tree, num_samples, num_chains):
     return teams, mcmc_draft_tree
 
 
-def do_mcmc_tree_search(mcmc_draft_tree, num_samples, num_chains=8, mix_chains_every=2000):
+def do_mcmc_tree_search(mcmc_draft_tree, num_samples, num_chains=6, mix_chains_every=5000):
     # Perform MCMC sampling in parallel
     # Number of times independent chains will be mixed
     teams = []
     curr_samples = 0
     while curr_samples < num_samples:
 
-        batch_samples = num_chains * mix_chains_every
-        batch_chains = num_chains
-        if batch_samples > num_samples-curr_samples:
-            batch_samples = int(math.ceil((num_samples-curr_samples)/float(mix_chains_every)))
-            batch_chains = int(math.ceil(batch_samples/float(mix_chains_every)))
-            print("leftover samples so now we're only running {0} chains with {1} samples".format(batch_chains,
-                                                                                                  batch_samples))
+        if mix_chains_every > num_samples-curr_samples:
+            # Decrease batch size for last batch if not exactly == mix_chains_every
+            mix_chains_every = num_samples-curr_samples
+            print("leftover samples so now we're only doing a batch of {0} samples".format(mix_chains_every))
 
         # Run a set of MCMC chains off current mcmc tree and merge results
-        print("Draft tree before mixins:\n%s" % mcmc_draft_tree.get_node("root"))
-        teams, mcmc_draft_tree = do_mcmc_draft_chain(mcmc_draft_tree, batch_samples, batch_chains)
-        print("Merged draft tree after mixins:\n%s" % mcmc_draft_tree.get_node("root"))
-        teams += teams
+        new_teams, mcmc_draft_tree = do_mcmc_draft_chain(mcmc_draft_tree, mix_chains_every, num_chains)
+        print("Merged draft tree after mixins:")
+        for draft_round in mcmc_draft_tree.draft_tree:
+            print(mcmc_draft_tree.get_node(str(draft_round)))
+            if int(draft_round) > 6:
+                break
 
+        teams += new_teams
         curr_samples = len(teams)
         print("Number teams so far: {0}".format(len(teams)))
 
@@ -515,11 +555,28 @@ my_players = db.potential_picks[cols.NAME_FIELD].tolist()
 print(my_players)
 injury_risk_model = EmpiricalInjuryModel(league_config)
 
-x = DraftTree(my_players, db, injury_risk_model=injury_risk_model, min_adp_prior=0.05, max_draft_node_size=20)
+x = DraftTree(my_players, db, injury_risk_model=injury_risk_model,
+              min_adp_prior=0.01,
+              max_draft_node_size=20,
+              n_rollouts=3)
+
 curr_round = x.start_round
 
 #teams, mcmc_tree = do_mcmc_tree_search(x, num_samples=30000, num_chains=4)
-teams, mcmc_tree = do_mcmc_draft_chain(x, num_samples=100000, num_chains=8)
+import time
+t0 = time.time()
+chains = cpu_count()
+#teams, mcmc_tree = do_mcmc_draft_chain(x, num_samples=100000, num_chains=chains)
+teams, mcmc_tree = do_mcmc_tree_search(x, num_samples=100000)
+#teams, mcmc_tree = do_mcmc_draft_chain(x, num_samples=20000, num_chains=6)
+print("Took {0} seconds with {1} cores".format(time.time()-t0, chains))
+
+#for i in range(1, 2000):
+#    if i % 100 == 0:
+#        print("Done %s samples" % i)
+#    x.sample()
+
+#mcmc_tree = x
 for i in range(curr_round, 15):
     print("ROUND %s:\n%s" % (i, mcmc_tree.get_node(i)))
 
@@ -537,6 +594,7 @@ for player in my_players:
                                     axis=1,
                                     player=player,
                                     draft_spot=curr_round - 1)
+results.to_excel("/Users/awaldrop/Desktop/test8.xlsx")
 #for i in range(1000):
 #    if i % 100 == 0:
 #        print("Done this  many: %s" % i)
@@ -548,7 +606,7 @@ for player in my_players:
 exit()
 
 derp = MCMCResultAnalyzer(my_players, curr_round, teams)
-derp.to_excel("/Users/awaldrop/Desktop/ff/test7.xlsx", index=False)
+derp.to_excel("/Users/awaldrop/Desktop/ff/test11.xlsx", index=False)
 derp.plot_density("sim_starters_pts_avg", "/Users/awaldrop/Desktop/test.png")
 derp.plot_density("sim_team_vorp_avg", "/Users/awaldrop/Desktop/test2.png")
 derp.plot_density("total_value", "/Users/awaldrop/Desktop/test3.png")
