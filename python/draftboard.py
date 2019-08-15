@@ -128,6 +128,14 @@ class Team:
     def startable_vorp(self):
         return sum([player.vorp for player in self.starters])
 
+    @property
+    def filled_positions(self):
+        filled = []
+        for pos in self.league_config["global"]["pos"]:
+            if len(self.get_players(pos)) >= self.league_config["draft"]["max"][pos]:
+                filled.append(pos)
+        return filled
+
     def get_players(self, positions):
         if not isinstance(positions, list):
             positions = [positions]
@@ -503,8 +511,6 @@ class DraftBoard:
         # Sort undrafted players by ADP
         draft_df = self.undrafted_players.sort_values(by=cols.ADP_FIELD)
         for player_name in draft_df[cols.NAME_FIELD]:
-            if len(self.exclude_players) > 0 and player_name in self.exclude_players[cols.NAME_FIELD]:
-                continue
             earliest_pick, latest_pick = self.get_player_draft_ci(player_name, confidence=1-prob_thresh)
             if latest_pick < start_pick:
                 # Don't consider players we can't reasonably expect to draft at this position
@@ -534,7 +540,7 @@ class DraftBoard:
             draft_df = draft_df[~draft_df[cols.NAME_FIELD].isin(self.exclude_players[cols.NAME_FIELD])]
         return draft_df.iloc[0:num_to_consider][cols.NAME_FIELD].tolist()
 
-    def get_auto_draft_selections(self, num_to_consider=1, team=None, ceiling_confidence=0.95):
+    def get_auto_draft_selections(self, num_to_consider=1, team=None, ceiling_confidence=0.1):
         # Get top-N players with highest ceiling using some statistical confidence
         team = self.get_current_team() if team is None else team
         best_players = []
@@ -545,6 +551,12 @@ class DraftBoard:
 
         best_players = sorted(best_players, key=lambda x: x.get_confidence_interval(ceiling_confidence)[1], reverse=True)[0:num_to_consider]
         return [player.name for player in best_players]
+
+    def get_adp_prob_info(self, players, pick_num):
+        # Return draft probability info for list of players
+        draft_df = self.draft_df[self.draft_df[cols.NAME_FIELD].isin(players)].copy()
+        draft_df["Draft Prob"] = pd.Series([self.get_player_draft_prob(player, pick_num) for player in players])
+        return draft_df
 
     def clone(self):
         return DraftBoard(self.draft_df.copy(deep=True), self.league_config)
