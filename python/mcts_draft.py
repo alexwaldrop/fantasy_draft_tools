@@ -53,7 +53,7 @@ class TeamState:
 class DraftTreeHelper:
     # Compare the expected outcomes from one or more players
     def __init__(self, players_to_compare, draft_board, min_adp_prior=0.05,
-                 max_draft_node_size=15, injury_model=None):
+                 max_draft_node_size=15, injury_model=None, bench_weight=0.5):
 
         # Draft board to use for simulation
         self.draft_board = draft_board
@@ -80,12 +80,17 @@ class DraftTreeHelper:
 
         # Maximum number of players to consider in at each draft node
         self.max_draft_node_size = max_draft_node_size
+        self.min_draft_node_size = None
 
         # Injury model to use for simulating team season scenarios
         self.injury_model = injury_model
 
         # Initialize board of
         self.draft_tree = self.init_draft_player_tree()
+
+        # Starter and total value weight to consider for team "payoff"
+        self.bench_weight = bench_weight
+        self.starter_weight = 0 if self.curr_team.starters_filled else 1
 
         # Dict for holding draft actions
         self.draft_actions_dict = {}
@@ -152,16 +157,16 @@ class DraftTreeHelper:
 
             else:
                 # Otherwise get players whose ADP confidence interval overlaps with current draft window
-
                 # If in last 3 rounds just open it up and try to find the best players
                 last_pick = 1000 if self.max_draft_rounds - draft_round <= 3 else next_pick - 1
-
+                print(last_pick)
                 possible_players = self.draft_board.get_probable_players_in_draft_window(curr_pick,
                                                                                          last_pick,
                                                                                          prob_thresh=self.min_adp_prior)
                 # Remove players from filled team positions
                 possible_players = possible_players[~possible_players[cols.POS_FIELD].isin(self.curr_team.filled_positions)]
 
+                print(len(possible_players))
                 # Reduce to a smaller set of players I'd actually draft
                 possible_players = self.subset_draftable_players(possible_players)
 
@@ -177,7 +182,7 @@ class DraftTreeHelper:
         # Set draft tree to be tree just created
         return draft_slot_board
 
-    def subset_draftable_players(self, possible_players):
+    def subset_draftable_players(self, possible_players, pos_miss_prob=0.01):
         # Goal is to reduce each node down to smallest number of players where each position still has a chance to
         # be drafted
 
@@ -192,7 +197,7 @@ class DraftTreeHelper:
 
             # Add player to draftable list until prob of no players from this group
             # at this position will be left falls below 5%
-            if pos_prob_missing[pos] > 0.01:
+            if pos_prob_missing[pos] > pos_miss_prob:
                 best_players.append(name)
                 pos_prob_missing[pos] *= (1-draft_prob)
 
@@ -201,7 +206,7 @@ class DraftTreeHelper:
             num_to_get = self.max_draft_node_size - len(best_players)
             best_wr_rb = possible_players[possible_players[cols.POS_FIELD].isin(["RB", "WR"])]
             best_wr_rb = best_wr_rb[~best_wr_rb[cols.NAME_FIELD].isin(best_players)].iloc[0:num_to_get]
-            best_players.append(best_wr_rb[cols.NAME_FIELD])
+            best_players.extend(best_wr_rb[cols.NAME_FIELD])
 
         # Return subsetted data frame
         return possible_players[possible_players[cols.NAME_FIELD].isin(best_players)]
@@ -246,9 +251,21 @@ class DraftTreeHelper:
             draft_round += 1
 
         # Simulate a season with the team
-        team.simulate_n_seasons(1, self.injury_model)
-        #print(", ".join(team.player_names))
+        if self.starter_weight != 0:
+            team.simulate_n_seasons(1, self.injury_model)
+            sim_results = team.get_summary_dict()
+            return (sim_results[cols.SIM_STARTERS_PTS] * self.starter_weight) + (
+                        self.bench_weight * sim_results[cols.SIM_BENCH_VORP] * self.bench_weight)
+        else:
+            # Simulate 100 season and get upper confidence interval of bench vorp
+            # Trying to maximize upside
+            team.simulate_n_seasons(50, self.injury_model, conf_interval=0.95)
+            sim_results = team.get_summary_dict()
+            return sim_results[cols.SIM_BENCH_VORP_HI_CI]
 
         # Compute value as average of starter and bench points
-        sim_results = team.get_summary_dict()
-        return (sim_results[cols.SIM_STARTERS_PTS] + sim_results[cols.SIM_TEAM_VORP]) / 2
+
+        #return (sim_results[cols.SIM_STARTERS_PTS] + sim_results[cols.SIM_TEAM_VORP]) / 2
+        #return sim_results[cols.SIM_TEAM_VORP]
+
+        #return (sim_results[cols.SIM_STARTERS_PTS]*self.starter_weight) + sim_results[cols.SIM_TEAM_VORP]

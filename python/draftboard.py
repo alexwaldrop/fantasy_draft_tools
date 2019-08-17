@@ -121,12 +121,21 @@ class Team:
         return starters
 
     @property
+    def bench(self):
+        starters = [x.name for x in self.starters]
+        return [x.name for x in self.players if x.name not in starters]
+
+    @property
     def startable_points(self):
         return sum([player.points for player in self.starters])
 
     @property
     def startable_vorp(self):
         return sum([player.vorp for player in self.starters])
+
+    @property
+    def bench_vorp(self):
+        return sum([player.vorp for player in self.bench])
 
     @property
     def filled_positions(self):
@@ -139,6 +148,13 @@ class Team:
     @property
     def is_full(self):
         return self.size == self.league_config["draft"]["team_size"]
+
+    @property
+    def starters_filled(self):
+        max_starters = 0
+        for pos in self.league_config["draft"]["start"]:
+            max_starters += self.league_config["draft"]["start"][pos]
+        return len(self.starters) == max_starters
 
     def get_players(self, positions):
         if not isinstance(positions, list):
@@ -182,7 +198,7 @@ class Team:
 
         return True
 
-    def simulate_n_seasons(self, n, injury_risk_model=None):
+    def simulate_n_seasons(self, n, injury_risk_model=None, conf_interval=0.95):
         # Simulate N number of seasons for each player on team
 
         # Just return if no players exist
@@ -220,27 +236,30 @@ class Team:
                     if num_starting == num_to_start:
                         break
 
+            bench = [player for player in remaining_players if player not in starters]
+
             # Return total points the starters scored that season
-            return sim_results_points[starters, season_index].sum()
+            return sim_results_points[starters, season_index].sum(), sim_results_vorp[bench, season_index].sum()
 
         # Get total number of points from starters for each simulated season
-        sim_points_starters = np.array([get_start_value(i) for i in range(n)])
+        sim_points_starters = np.array([get_start_value(i)[0] for i in range(n)])
+        sim_vorp_bench = np.array([get_start_value(i)[1] for i in range(n)])
 
         # Get total number of points from whole team for each simulated season
-        sim_vorp_team       = sim_results_vorp.sum(axis=0)
+        #sim_vorp_team       = sim_results_vorp.sum(axis=0)
 
         # Determine indices to use for 5th and 95th percentiles
-        percentile_indices  = [int(math.ceil(n * 0.05))-1, int(math.ceil(n * 0.95))-1]
+        percentile_indices  = [int(math.ceil(n * (1-conf_interval)))-1, int(math.ceil(n * conf_interval))-1]
 
         # Calculate total team value of each simulated season
-        self.simulation_results = {"sim_team_vorp_avg": sim_vorp_team.mean(),
-                                   "sim_team_vorp_sd": sim_vorp_team.std(),
-                                   "sim_team_vorp_5pct": np.sort(sim_vorp_team)[percentile_indices[0]],
-                                   "sim_team_vorp_95pct": np.sort(sim_vorp_team)[percentile_indices[1]],
+        self.simulation_results = {"sim_bench_vorp_avg": sim_vorp_bench.mean(),
+                                   "sim_bench_vorp_sd": sim_vorp_bench.std(),
+                                   "sim_bench_vorp_low_CI": np.sort(sim_vorp_bench)[percentile_indices[0]],
+                                   "sim_bench_vorp_hi_CI": np.sort(sim_vorp_bench)[percentile_indices[1]],
                                    "sim_starters_pts_avg": sim_points_starters.mean(),
                                    "sim_starters_pts_sd": sim_points_starters.std(),
-                                   "sim_starters_pts_5pct": np.sort(sim_points_starters)[percentile_indices[0]],
-                                   "sim_starters_pts_95pct": np.sort(sim_points_starters)[percentile_indices[1]]}
+                                   "sim_starters_pts_low_CI": np.sort(sim_points_starters)[percentile_indices[0]],
+                                   "sim_starters_pts_hi_CI": np.sort(sim_points_starters)[percentile_indices[1]]}
 
     def get_summary_dict(self):
         team_dict = OrderedDict()

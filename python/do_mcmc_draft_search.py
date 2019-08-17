@@ -3,7 +3,6 @@ import logging
 import os
 import pandas as pd
 import yaml
-import json
 
 import utils
 import constants as cols
@@ -50,6 +49,14 @@ def configure_argparser(argparser_obj):
                                default=10,
                                help="Time in minutes to run")
 
+    argparser_obj.add_argument("--rollouts",
+                               action="store",
+                               type=int,
+                               dest="n_rollouts",
+                               required=False,
+                               default=3,
+                               help="Humber of rollouts during expansion")
+
     argparser_obj.add_argument("--explore-const",
                                action="store",
                                type=float,
@@ -57,6 +64,22 @@ def configure_argparser(argparser_obj):
                                required=False,
                                default=0.25,
                                help="Exploration constat")
+
+    argparser_obj.add_argument("--sim-injury",
+                               action="store",
+                               type=bool,
+                               dest="sim_injury",
+                               required=False,
+                               default=False,
+                               help="Exploration constat")
+
+    argparser_obj.add_argument("--bench-weight",
+                               action="store",
+                               type=float,
+                               dest="bench_weight",
+                               required=False,
+                               default=1.0,
+                               help="Scaling factor for how much you value a deep bench")
 
     # Verbosity level
     argparser_obj.add_argument("-v",
@@ -86,6 +109,10 @@ def main():
     draftboard_file  = args.db_file
     league_config_file = args.league_config
     time_to_run = args.time
+    exploration_const = args.exp_constant
+    bench_weight = args.bench_weight
+    n_rollouts = args.n_rollouts
+    sim_injury = args.sim_injury
 
     # Read config file
     with open(league_config_file, "r") as stream:
@@ -101,18 +128,21 @@ def main():
     my_players = db.potential_picks[cols.NAME_FIELD].tolist()
     logging.info("Players to compare: {0}".format(", ".join(my_players)))
 
+    injury_risk_model = mcts_draft.EmpiricalInjuryModel(league_config) if sim_injury else None
+
     draft_tree_helper = mcts_draft.DraftTreeHelper(my_players,
                                                    db,
                                                    min_adp_prior=0.01,
                                                    max_draft_node_size=25,
-                                                   injury_model=None)
+                                                   injury_model=injury_risk_model,
+                                                   bench_weight=bench_weight)
 
     # Initialize MCTS for mcmc tree search
     mcmc_tree = mcts.MCTS(root_state=draft_tree_helper.get_root(),
                           tree_helper=draft_tree_helper,
                           time_limit=time_to_run*1000*60,
-                          num_rollouts=3,
-                          exploration_constant=0.25)
+                          num_rollouts=n_rollouts,
+                          exploration_constant=exploration_const)
 
     # Do MCTS search and output best player
     best_action = mcmc_tree.search()
