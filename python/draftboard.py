@@ -136,6 +136,10 @@ class Team:
                 filled.append(pos)
         return filled
 
+    @property
+    def is_full(self):
+        return self.size == self.league_config["draft"]["team_size"]
+
     def get_players(self, positions):
         if not isinstance(positions, list):
             positions = [positions]
