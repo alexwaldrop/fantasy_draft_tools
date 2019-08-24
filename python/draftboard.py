@@ -198,7 +198,7 @@ class Team:
 
         return True
 
-    def simulate_n_seasons(self, n, injury_risk_model=None, conf_interval=0.95):
+    def simulate_n_seasons(self, n, injury_risk_model=None, conf_interval=0.95, null_player=None):
         # Simulate N number of seasons for each player on team
 
         # Just return if no players exist
@@ -206,6 +206,12 @@ class Team:
             return
 
         sim_results_points = np.array([player.simulate_n_seasons(n, injury_risk_model) for player in self.players])
+
+        # Replace null player with replacement-level season
+        if null_player:
+            for i in range(len(self.players)):
+                if self.players[i].name == null_player:
+                    sim_results_points[i] = np.array([self.players[i].vorp_baseline]*n)
 
         # Get simulated VORPs for each player
         sim_results_vorp = np.array([sim_results_points[i,:] - self.players[i].vorp_baseline for i in range(len(self.players))])
@@ -244,9 +250,6 @@ class Team:
         # Get total number of points from starters for each simulated season
         sim_points_starters = np.array([get_start_value(i)[0] for i in range(n)])
         sim_vorp_bench = np.array([get_start_value(i)[1] for i in range(n)])
-
-        # Get total number of points from whole team for each simulated season
-        #sim_vorp_team       = sim_results_vorp.sum(axis=0)
 
         # Determine indices to use for 5th and 95th percentiles
         percentile_indices  = [int(math.ceil(n * (1-conf_interval)))-1, int(math.ceil(n * conf_interval))-1]
