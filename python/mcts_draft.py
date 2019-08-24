@@ -250,22 +250,6 @@ class DraftTreeHelper:
             team.draft_player(player)
             draft_round += 1
 
-        # Simulate a season with the team
-        if self.starter_weight != 0:
-            team.simulate_n_seasons(1, self.injury_model)
-            sim_results = team.get_summary_dict()
-            return (sim_results[cols.SIM_STARTERS_PTS] * self.starter_weight) + (
-                        self.bench_weight * sim_results[cols.SIM_BENCH_VORP] * self.bench_weight)
-        else:
-            # Simulate 100 season and get upper confidence interval of bench vorp
-            # Trying to maximize upside
-            team.simulate_n_seasons(50, self.injury_model, conf_interval=0.95)
-            sim_results = team.get_summary_dict()
-            return sim_results[cols.SIM_BENCH_VORP_HI_CI]
-
-        # Compute value as average of starter and bench points
-
-        #return (sim_results[cols.SIM_STARTERS_PTS] + sim_results[cols.SIM_TEAM_VORP]) / 2
-        #return sim_results[cols.SIM_TEAM_VORP]
-
-        #return (sim_results[cols.SIM_STARTERS_PTS]*self.starter_weight) + sim_results[cols.SIM_TEAM_VORP]
+        # Simulate a season and return simulated points of starters
+        team.simulate_n_seasons(1, self.injury_model)
+        return team.get_summary_dict()[cols.SIM_STARTERS_PTS]
