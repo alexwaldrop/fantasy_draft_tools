@@ -259,4 +259,5 @@ class DraftTreeHelper:
 
         # Simulate a season and return simulated points of starters
         team.simulate_n_seasons(1, self.injury_model)
-        return team.get_summary_dict()[cols.SIM_STARTERS_PTS]
+        stats = team.get_summary_dict()
+        return stats[cols.SIM_STARTERS_PTS] + self.bench_weight*stats[cols.SIM_BENCH_VORP]

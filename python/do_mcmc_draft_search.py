@@ -78,7 +78,7 @@ def configure_argparser(argparser_obj):
                                type=float,
                                dest="bench_weight",
                                required=False,
-                               default=1.0,
+                               default=0.5,
                                help="Scaling factor for how much you value a deep bench")
 
     # Verbosity level
