@@ -159,16 +159,18 @@ class DraftTreeHelper:
                 # Otherwise get players whose ADP confidence interval overlaps with current draft window
                 # If in last 3 rounds just open it up and try to find the best players
                 last_pick = 1000 if self.max_draft_rounds - draft_round <= 3 else next_pick - 1
-                print(last_pick)
                 possible_players = self.draft_board.get_probable_players_in_draft_window(curr_pick,
                                                                                          last_pick,
                                                                                          prob_thresh=self.min_adp_prior)
                 # Remove players from filled team positions
                 possible_players = possible_players[~possible_players[cols.POS_FIELD].isin(self.curr_team.filled_positions)]
 
-                print(len(possible_players))
                 # Reduce to a smaller set of players I'd actually draft
                 possible_players = self.subset_draftable_players(possible_players)
+
+            # Order by expected return
+            #possible_players["ExpReturn"] = possible_players["Draft Prob"]*possible_players[cols.VORP_FIELD]
+            #possible_players = possible_players.sort_values(by="ExpReturn", ascending=False)
 
             # Add node to mcmc tree
             draft_slot_board[str(draft_round)] = possible_players
@@ -239,15 +241,20 @@ class DraftTreeHelper:
         team = deepcopy(team_state.team)
         draft_round = team.size + 1
         while draft_round <= self.draft_board.league_config["draft"]["team_size"]:
-            # Randomly select player from player pool
+            # Randomly select player from player pool, simulate whether they're available, and choose best available
 
-            # Keep drawing until you find a valid player
-            player = self.draft_board.get_player(np.random.choice(self.draft_tree[str(draft_round)][cols.NAME_FIELD]))
-            while not team.can_add_player(player):
-                player = self.draft_board.get_player(np.random.choice(self.draft_tree[str(draft_round)][cols.NAME_FIELD]))
+            # Get list of available players in this round
+            players = self.draft_tree[str(draft_round)][cols.NAME_FIELD].tolist()
+            probs = self.draft_tree[str(draft_round)]["Draft Prob"].tolist()
 
-            # Draft player on team
-            team.draft_player(player)
+            # Simulate which ones are available
+            available_players = [self.draft_board.get_player(players[i]) for i in range(len(players)) if probs[i] > np.random.uniform()]
+            # Draft the best available player that can play on the current team
+            for available_player in available_players:
+                if team.can_add_player(available_player):
+                    team.draft_player(available_player)
+                    break
+
             draft_round += 1
 
         # Simulate a season and return simulated points of starters
