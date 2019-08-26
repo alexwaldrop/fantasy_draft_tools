@@ -566,16 +566,14 @@ class DraftBoard:
             draft_df = draft_df[~draft_df[cols.NAME_FIELD].isin(self.exclude_players[cols.NAME_FIELD])]
         return draft_df.iloc[0:num_to_consider][cols.NAME_FIELD].tolist()
 
-    def get_auto_draft_selections(self, num_to_consider=1, team=None, ceiling_confidence=0.1):
+    def get_auto_draft_selections(self, num_to_consider=1, team=None):
         # Get top-N players with highest ceiling using some statistical confidence
         team = self.get_current_team() if team is None else team
         best_players = []
         for pos in self.league_config["global"]["pos"]:
-            players = self.get_best_available(pos, num_to_consider*3)
+            players = self.get_best_available(pos, num_to_consider)
             if team.can_add_player(self.get_player(players[0])):
                 best_players += [self.get_player(player) for player in players]
-
-        best_players = sorted(best_players, key=lambda x: x.get_confidence_interval(ceiling_confidence)[1], reverse=True)[0:num_to_consider]
         return [player.name for player in best_players]
 
     def get_adp_prob_info(self, players, pick_num):

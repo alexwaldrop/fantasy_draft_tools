@@ -26,7 +26,7 @@ def configure_argparser(argparser_obj):
         return arg_string
 
     # Path to projections spreadsheet
-    argparser_obj.add_argument("--draftboardt",
+    argparser_obj.add_argument("--draftboard",
                                action="store",
                                type=file_type,
                                dest="db_file",
@@ -124,8 +124,11 @@ def main():
     # Initialize and validate draft board
     db = draftboard.DraftBoard(draft_df, league_config)
 
+
     # Get my potential picks
     my_players = db.potential_picks[cols.NAME_FIELD].tolist()
+    if not my_players:
+        my_players = db.get_auto_draft_selections()
     logging.info("Players to compare: {0}".format(", ".join(my_players)))
 
     injury_risk_model = mcts_draft.EmpiricalInjuryModel(league_config) if sim_injury else None
