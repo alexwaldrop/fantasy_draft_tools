@@ -101,10 +101,10 @@ scoring:
       points : -4
 
 vorp:
-  QB: 24
-  RB: 35
-  WR: 36
-  TE: 12
+  QB: 27
+  RB: 42
+  WR: 47
+  TE: 14
   K: 8
   DST: 3
   DL: 10
@@ -128,8 +128,8 @@ draft:
     TE: 1
   max:
     QB: 4
-    RB: 7
-    WR: 7
+    RB: 6
+    WR: 6
     TE: 1
 
 simulation:
