@@ -128,8 +128,8 @@ draft:
     TE: 1
   max:
     QB: 1
-    RB: 7
-    WR: 7
+    RB: 6
+    WR: 6
     TE: 1
 
 simulation:
