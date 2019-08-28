@@ -1,5 +1,5 @@
 global:
-  pos: ["QB", "RB", "WR", "TE"]
+  pos: ["QB", "RB", "WR", "TE", "DST", "K"]
   season: 2019
 
 adp:
@@ -122,16 +122,22 @@ draft:
     WR: 2
     TE: 1
     Flex: 1
+    DST: 1
+    K: 1
   min:
     QB: 1
     RB: 4
     WR: 4
     TE: 1
+    K: 1
+    DST: 1
   max:
     QB: 1
     RB: 6
     WR: 6
     TE: 1
+    DST: 1
+    K: 1
 
 simulation:
   num_sim_seaons : 1000
