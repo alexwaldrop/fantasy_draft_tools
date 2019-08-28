@@ -3,7 +3,8 @@ global:
   season: 2019
 
 adp:
-  league_format: 2qb
+  #league_format: 2qb
+  league_format: half-ppr
 
 projections:
   sources: ["CBS", "ESPN", "FantasyData", "FantasyPros",
@@ -101,9 +102,9 @@ scoring:
       points : -4
 
 vorp:
-  QB: 27
+  QB: 15
   RB: 42
-  WR: 47
+  WR: 46
   TE: 14
   K: 8
   DST: 3
@@ -112,22 +113,22 @@ vorp:
   DB: 10
 
 draft:
-  league_size: 12
-  team_size: 15
+  league_size: 14
+  team_size: 12
   flex_pos: ["RB", "WR"]
   start:
-    QB: 2
+    QB: 1
     RB: 2
     WR: 2
     TE: 1
     Flex: 1
   min:
-    QB: 3
+    QB: 1
     RB: 4
     WR: 4
     TE: 1
   max:
-    QB: 4
+    QB: 1
     RB: 6
     WR: 6
     TE: 1
